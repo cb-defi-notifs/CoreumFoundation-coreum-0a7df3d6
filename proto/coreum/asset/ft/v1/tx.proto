@@ -14,6 +14,8 @@ option (gogoproto.goproto_getters_all) = false;
 
 // Msg defines the Msg service.
 service Msg {
+  option (cosmos.msg.v1.service) = true;
+
   // Issue defines a method to issue a new fungible token.
   rpc Issue(MsgIssue) returns (EmptyResponse);
 
@@ -38,8 +40,17 @@ service Msg {
   // This operation is idempotent so global unfreezing of non-frozen token does nothing.
   rpc GloballyUnfreeze(MsgGloballyUnfreeze) returns (EmptyResponse);
 
+  // Clawback confiscates a part of fungible tokens from an account
+  // to the admin, only if the clawback feature is enabled on that token.
+  rpc Clawback(MsgClawback) returns (EmptyResponse);
+
   // SetWhitelistedLimit sets the limit of how many tokens a specific account may hold.
   rpc SetWhitelistedLimit(MsgSetWhitelistedLimit) returns (EmptyResponse);
+
+  // TransferAdmin changes admin of a fungible token.
+  rpc TransferAdmin(MsgTransferAdmin) returns (EmptyResponse);
+  // ClearAdmin removes admin of a fungible token.
+  rpc ClearAdmin(MsgClearAdmin) returns (EmptyResponse);
 
   // TokenUpgradeV1 upgrades token to version V1.
   rpc UpgradeTokenV1(MsgUpgradeTokenV1) returns (EmptyResponse);
@@ -47,16 +58,22 @@ service Msg {
   // UpdateParams is a governance operation to modify the parameters of the module.
   // NOTE: all parameters must be provided.
   rpc UpdateParams(MsgUpdateParams) returns (EmptyResponse);
+
+  // UpdateDEXSettings upgrades token DEX settings.
+  rpc UpdateDEXSettings(MsgUpdateDEXSettings) returns (EmptyResponse);
 }
 
 // MsgIssue defines message to issue new fungible token.
 message MsgIssue {
-  string issuer = 1;
+  option (cosmos.msg.v1.signer) = "issuer";
+  option (amino.name) = "assetft/MsgIssue";
+
+  string issuer = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   string symbol = 2;
   string subunit = 3;
   uint32 precision = 4;
   string initial_amount = 5 [
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Int",
+    (gogoproto.customtype) = "cosmossdk.io/math.Int",
     (gogoproto.nullable) = false
   ];
   string description = 6;
@@ -65,78 +82,166 @@ message MsgIssue {
   // burn_amount. This value will be burnt on top of the send amount.
   string burn_rate = 8 [
     (gogoproto.nullable) = false,
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Dec"
+    (gogoproto.customtype) = "cosmossdk.io/math.LegacyDec"
   ];
   // send_commission_rate is a number between 0 and 1 which will be multiplied by send amount to determine
-  // amount sent to the token issuer account.
+  // amount sent to the token admin account.
   string send_commission_rate = 9 [
     (gogoproto.nullable) = false,
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Dec"
+    (gogoproto.customtype) = "cosmossdk.io/math.LegacyDec"
   ];
   string uri = 10 [(gogoproto.customname) = "URI"];
   string uri_hash = 11 [(gogoproto.customname) = "URIHash"];
+  // extension_settings must be provided in case wasm extensions are enabled.
+  ExtensionIssueSettings extension_settings = 12;
+  DEXSettings dex_settings = 13 [(gogoproto.customname) = "DEXSettings"];
+}
+
+// ExtensionIssueSettings are settings that will be used to Instantiate the smart contract which contains
+// the source code for the extension.
+message ExtensionIssueSettings {
+  // code_id is the reference to the stored WASM code
+  uint64 code_id = 1;
+  // label is optional metadata to be stored with a contract instance.
+  string label = 2;
+  // funds coins that are transferred to the contract on instantiation
+  repeated cosmos.base.v1beta1.Coin funds = 3 [
+    (gogoproto.nullable) = false,
+    (amino.dont_omitempty) = true,
+    (gogoproto.castrepeated) = "github.com/cosmos/cosmos-sdk/types.Coins"
+  ];
+  // optional json encoded data to pass to WASM on instantiation by the ft issuer
+  bytes issuanceMsg = 4 [
+    (gogoproto.casttype) = "github.com/CosmWasm/wasmd/x/wasm/types.RawContractMessage",
+    (amino.encoding) = "inline_json"
+  ];
 }
 
 message MsgMint {
-  string sender = 1;
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgMint";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   cosmos.base.v1beta1.Coin coin = 2 [(gogoproto.nullable) = false];
   string recipient = 3;
 }
 
 message MsgBurn {
-  string sender = 1;
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgBurn";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   cosmos.base.v1beta1.Coin coin = 3 [(gogoproto.nullable) = false];
 }
 
 message MsgFreeze {
-  string sender = 1;
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgFreeze";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   string account = 2;
   cosmos.base.v1beta1.Coin coin = 3 [(gogoproto.nullable) = false];
 }
 
 message MsgUnfreeze {
-  string sender = 1;
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgUnfreeze";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   string account = 2;
   cosmos.base.v1beta1.Coin coin = 3 [(gogoproto.nullable) = false];
 }
 
 message MsgSetFrozen {
-  string sender = 1;
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/SetFrozen";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   string account = 2;
   cosmos.base.v1beta1.Coin coin = 3 [(gogoproto.nullable) = false];
 }
 
 message MsgGloballyFreeze {
-  string sender = 1;
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgGloballyFreeze";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   string denom = 2;
 }
 
 message MsgGloballyUnfreeze {
-  string sender = 1;
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgGloballyUnfreeze";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   string denom = 2;
 }
 
-message MsgSetWhitelistedLimit {
-  string sender = 1;
+message MsgClawback {
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgClawback";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   string account = 2;
   cosmos.base.v1beta1.Coin coin = 3 [(gogoproto.nullable) = false];
 }
 
+message MsgSetWhitelistedLimit {
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgSetWhitelistedLimit";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
+  string account = 2;
+  cosmos.base.v1beta1.Coin coin = 3 [(gogoproto.nullable) = false];
+}
+
+message MsgTransferAdmin {
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgTransferAdmin";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
+  string account = 2;
+  string denom = 3;
+}
+
+message MsgClearAdmin {
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgClearAdmin";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
+  string denom = 2;
+}
+
 // MsgUpgradeTokenV1 is the message upgrading token to V1.
 message MsgUpgradeTokenV1 {
-  string sender = 1;
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgUpgradeTokenV1";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   string denom = 2;
   bool ibc_enabled = 3;
 }
 
 message MsgUpdateParams {
   option (cosmos.msg.v1.signer) = "authority";
-  option (amino.name) = "cosmos-sdk/MsgUpdateParams";
+  option (amino.name) = "assetft/MsgUpdateParams";
 
   string authority = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
   Params params = 2 [
     (gogoproto.nullable) = false,
     (amino.dont_omitempty) = true
+  ];
+}
+
+message MsgUpdateDEXSettings {
+  option (cosmos.msg.v1.signer) = "sender";
+  option (amino.name) = "assetft/MsgUpdateDEXSettings";
+
+  string sender = 1 [(cosmos_proto.scalar) = "cosmos.AddressString"];
+  string denom = 2;
+  DEXSettings dex_settings = 3 [
+    (gogoproto.customname) = "DEXSettings",
+    (gogoproto.nullable) = false
   ];
 }
 

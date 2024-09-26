@@ -13,8 +13,8 @@ import (
 	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-	ibctransfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
-	ibcchanneltypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
+	ibctransfertypes "github.com/cosmos/ibc-go/v8/modules/apps/transfer/types"
+	ibcchanneltypes "github.com/cosmos/ibc-go/v8/modules/core/04-channel/types"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -64,6 +64,7 @@ func TestIBCFailsIfNotEnabled(t *testing.T) {
 	_, err = coreumChain.ExecuteIBCTransfer(
 		ctx,
 		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
 		coreumIssuer,
 		sdk.NewCoin(assetfttypes.BuildDenom(issueMsg.Subunit, coreumIssuer), sdkmath.NewInt(1000)),
 		gaiaChain.ChainContext,
@@ -83,16 +84,16 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 	osmosisChain := chains.Osmosis
 
 	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 	coreumToGaiaChannelID := coreumChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, gaiaChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, gaiaChain.ChainContext,
 	)
 	osmosisToCoreumChannelID := osmosisChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 	coreumToOsmosisChannelID := coreumChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, osmosisChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, osmosisChain.ChainContext,
 	)
 
 	coreumToGaiaEscrowAddress := ibctransfertypes.GetEscrowAddress(ibctransfertypes.PortID, coreumToGaiaChannelID)
@@ -114,10 +115,10 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 
 	osmosisChain.Faucet.FundAccounts(ctx, t, integration.FundedAccount{
 		Address: osmosisRecipient1,
-		Amount:  gaiaChain.NewCoin(sdkmath.NewInt(1000000)), // coin for the fees
+		Amount:  osmosisChain.NewCoin(sdkmath.NewInt(1000000)), // coin for the fees
 	}, integration.FundedAccount{
 		Address: osmosisRecipient2,
-		Amount:  gaiaChain.NewCoin(sdkmath.NewInt(1000000)), // coin for the fees
+		Amount:  osmosisChain.NewCoin(sdkmath.NewInt(1000000)), // coin for the fees
 	})
 
 	coreumIssuer := coreumChain.GenAccount()
@@ -145,8 +146,8 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		Subunit:            "mysubunit",
 		Precision:          8,
 		InitialAmount:      sdkmath.NewInt(1_000_000),
-		BurnRate:           sdk.MustNewDecFromStr("0.1"),
-		SendCommissionRate: sdk.MustNewDecFromStr("0.2"),
+		BurnRate:           sdkmath.LegacyMustNewDecFromStr("0.1"),
+		SendCommissionRate: sdkmath.LegacyMustNewDecFromStr("0.2"),
 		Features: []assetfttypes.Feature{
 			assetfttypes.Feature_block_smart_contracts,
 			assetfttypes.Feature_ibc,
@@ -162,8 +163,8 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 	denom := assetfttypes.BuildDenom(issueMsg.Subunit, coreumIssuer)
 
 	sendCoin := sdk.NewCoin(denom, sdkmath.NewInt(1000))
-	burntAmount := issueMsg.BurnRate.Mul(sdk.NewDecFromInt(sendCoin.Amount)).TruncateInt()
-	sendCommissionAmount := issueMsg.SendCommissionRate.Mul(sdk.NewDecFromInt(sendCoin.Amount)).TruncateInt()
+	burntAmount := issueMsg.BurnRate.Mul(sdkmath.LegacyNewDecFromInt(sendCoin.Amount)).TruncateInt()
+	sendCommissionAmount := issueMsg.SendCommissionRate.Mul(sdkmath.LegacyNewDecFromInt(sendCoin.Amount)).TruncateInt()
 	extraAmount := sdkmath.NewInt(77) // some amount to be left at the end
 	msgSend := &banktypes.MsgSend{
 		FromAddress: coreumIssuer.String(),
@@ -194,6 +195,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		ctx,
 		t,
 		coreumChain.ChainContext,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
 		coreumIssuer,
 		sendCoin,
 		gaiaChain.ChainContext,
@@ -213,6 +215,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		ctx,
 		t,
 		coreumChain.ChainContext,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
 		coreumSender,
 		sendCoin,
 		gaiaChain.ChainContext,
@@ -235,6 +238,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		ctx,
 		t,
 		coreumChain.ChainContext,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
 		coreumIssuer,
 		sendCoin,
 		osmosisChain.ChainContext,
@@ -254,6 +258,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		ctx,
 		t,
 		coreumChain.ChainContext,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
 		coreumSender,
 		sendCoin,
 		osmosisChain.ChainContext,
@@ -276,6 +281,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		ctx,
 		t,
 		gaiaChain.ChainContext,
+		gaiaChain.TxFactoryAuto(),
 		gaiaRecipient1,
 		receiveCoinGaia,
 		coreumChain.ChainContext,
@@ -295,6 +301,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		ctx,
 		t,
 		gaiaChain.ChainContext,
+		gaiaChain.TxFactoryAuto(),
 		gaiaRecipient2,
 		receiveCoinGaia,
 		coreumChain.ChainContext,
@@ -306,7 +313,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		map[string]sdkmath.Int{
 			coreumChain.MustConvertToBech32Address(coreumToGaiaEscrowAddress): sendCoin.Amount.Neg(),
 			coreumChain.MustConvertToBech32Address(coreumSender):              sendCoin.Amount,
-			coreumChain.MustConvertToBech32Address(coreumIssuer):              sdk.ZeroInt(),
+			coreumChain.MustConvertToBech32Address(coreumIssuer):              sdkmath.ZeroInt(),
 		},
 	)
 
@@ -316,6 +323,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		ctx,
 		t,
 		osmosisChain.ChainContext,
+		osmosisChain.TxFactoryAuto(),
 		osmosisRecipient1,
 		receiveCoinOsmosis,
 		coreumChain.ChainContext,
@@ -335,6 +343,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		ctx,
 		t,
 		osmosisChain.ChainContext,
+		osmosisChain.TxFactoryAuto(),
 		osmosisRecipient2,
 		receiveCoinOsmosis,
 		coreumChain.ChainContext,
@@ -346,7 +355,7 @@ func TestIBCAssetFTSendCommissionAndBurnRate(t *testing.T) {
 		map[string]sdkmath.Int{
 			coreumChain.MustConvertToBech32Address(coreumToOsmosisEscrowAddress): sendCoin.Amount.Neg(),
 			coreumChain.MustConvertToBech32Address(coreumSender):                 sendCoin.Amount,
-			coreumChain.MustConvertToBech32Address(coreumIssuer):                 sdk.ZeroInt(),
+			coreumChain.MustConvertToBech32Address(coreumIssuer):                 sdkmath.ZeroInt(),
 		},
 	)
 }
@@ -359,7 +368,7 @@ func TestIBCAssetFTWhitelisting(t *testing.T) {
 	coreumChain := chains.Coreum
 	gaiaChain := chains.Gaia
 	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 
 	coreumIssuer := coreumChain.GenAccount()
@@ -420,7 +429,15 @@ func TestIBCAssetFTWhitelisting(t *testing.T) {
 	require.NoError(t, err)
 
 	// send minted coins to gaia
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumIssuer, sendCoin, gaiaChain.ChainContext, gaiaRecipient)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumIssuer,
+		sendCoin,
+		gaiaChain.ChainContext,
+		gaiaRecipient,
+	)
 	requireT.NoError(err)
 
 	ibcDenom := ConvertToIBCDenom(gaiaToCoreumChannelID, denom)
@@ -429,11 +446,11 @@ func TestIBCAssetFTWhitelisting(t *testing.T) {
 	// send coins back to two accounts, one blocked, one whitelisted
 	ibcSendCoin := sdk.NewCoin(ibcDenom, sendBackCoin.Amount)
 	_, err = gaiaChain.ExecuteIBCTransfer(
-		ctx, t, gaiaRecipient, ibcSendCoin, coreumChain.ChainContext, coreumRecipientBlocked,
+		ctx, t, gaiaChain.TxFactoryAuto(), gaiaRecipient, ibcSendCoin, coreumChain.ChainContext, coreumRecipientBlocked,
 	)
 	requireT.NoError(err)
 	_, err = gaiaChain.ExecuteIBCTransfer(
-		ctx, t, gaiaRecipient, ibcSendCoin, coreumChain.ChainContext, coreumRecipientWhitelisted,
+		ctx, t, gaiaChain.TxFactoryAuto(), gaiaRecipient, ibcSendCoin, coreumChain.ChainContext, coreumRecipientWhitelisted,
 	)
 	requireT.NoError(err)
 
@@ -449,7 +466,7 @@ func TestIBCAssetFTWhitelisting(t *testing.T) {
 		Denom:   denom,
 	})
 	requireT.NoError(err)
-	requireT.Equal(sdk.NewCoin(denom, sdk.ZeroInt()).String(), balanceRes.Balance.String())
+	requireT.Equal(sdk.NewCoin(denom, sdkmath.ZeroInt()).String(), balanceRes.Balance.String())
 }
 
 func TestIBCAssetFTFreezing(t *testing.T) {
@@ -462,7 +479,7 @@ func TestIBCAssetFTFreezing(t *testing.T) {
 	gaiaChain := chains.Gaia
 
 	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 
 	coreumIssuer := coreumChain.GenAccount()
@@ -540,18 +557,42 @@ func TestIBCAssetFTFreezing(t *testing.T) {
 	require.NoError(t, err)
 
 	// send more than allowed, should fail
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumSender, sendCoin, gaiaChain.ChainContext, gaiaRecipient)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumSender,
+		sendCoin,
+		gaiaChain.ChainContext,
+		gaiaRecipient,
+	)
 	requireT.Error(err)
 	assertT.Contains(err.Error(), cosmoserrors.ErrInsufficientFunds.Error())
 
 	// send up to the limit, should succeed
 	ibcCoin := sdk.NewCoin(ConvertToIBCDenom(gaiaToCoreumChannelID, denom), halfCoin.Amount)
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumSender, halfCoin, gaiaChain.ChainContext, gaiaRecipient)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumSender,
+		halfCoin,
+		gaiaChain.ChainContext,
+		gaiaRecipient,
+	)
 	requireT.NoError(err)
 	requireT.NoError(gaiaChain.AwaitForBalance(ctx, t, gaiaRecipient, ibcCoin))
 
 	// send it back, frozen limit should not affect it
-	_, err = gaiaChain.ExecuteIBCTransfer(ctx, t, gaiaRecipient, ibcCoin, coreumChain.ChainContext, coreumSender)
+	_, err = gaiaChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		gaiaChain.TxFactoryAuto(),
+		gaiaRecipient,
+		ibcCoin,
+		coreumChain.ChainContext,
+		coreumSender,
+	)
 	requireT.NoError(err)
 	requireT.NoError(coreumChain.AwaitForBalance(ctx, t, coreumSender, sendCoin))
 }
@@ -566,7 +607,7 @@ func TestEscrowAddressIsResistantToFreezingAndWhitelisting(t *testing.T) {
 	gaiaChain := chains.Gaia
 
 	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 
 	coreumIssuer := coreumChain.GenAccount()
@@ -582,6 +623,7 @@ func TestEscrowAddressIsResistantToFreezingAndWhitelisting(t *testing.T) {
 		Messages: []sdk.Msg{
 			&assetfttypes.MsgIssue{},
 			&assetfttypes.MsgFreeze{},
+			&assetfttypes.MsgSetWhitelistedLimit{},
 			&ibctransfertypes.MsgTransfer{},
 			&ibctransfertypes.MsgTransfer{},
 		},
@@ -612,11 +654,19 @@ func TestEscrowAddressIsResistantToFreezingAndWhitelisting(t *testing.T) {
 	sendCoin := sdk.NewCoin(denom, issueMsg.InitialAmount)
 
 	coreumToGaiaChannelID := coreumChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, gaiaChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, gaiaChain.ChainContext,
 	)
 
 	// send minted coins to gaia
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumIssuer, sendCoin, gaiaChain.ChainContext, gaiaRecipient)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumIssuer,
+		sendCoin,
+		gaiaChain.ChainContext,
+		gaiaRecipient,
+	)
 	requireT.NoError(err)
 
 	ibcDenom := ConvertToIBCDenom(gaiaToCoreumChannelID, denom)
@@ -638,10 +688,31 @@ func TestEscrowAddressIsResistantToFreezingAndWhitelisting(t *testing.T) {
 	require.NoError(t, err)
 
 	// send coins back to coreum, it should succeed despite frozen escrow address
+	coreumRecipient := chains.Coreum.GenAccount()
+	whitelistMsg := &assetfttypes.MsgSetWhitelistedLimit{
+		Sender:  coreumIssuer.String(),
+		Account: coreumRecipient.String(),
+		Coin:    sendCoin,
+	}
+	_, err = client.BroadcastTx(
+		ctx,
+		coreumChain.ClientContext.WithFromAddress(coreumIssuer),
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(whitelistMsg)),
+		whitelistMsg,
+	)
+	require.NoError(t, err)
 	ibcSendCoin := sdk.NewCoin(ibcDenom, sendCoin.Amount)
-	_, err = gaiaChain.ExecuteIBCTransfer(ctx, t, gaiaRecipient, ibcSendCoin, coreumChain.ChainContext, coreumIssuer)
+	_, err = gaiaChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		gaiaChain.TxFactoryAuto(),
+		gaiaRecipient,
+		ibcSendCoin,
+		coreumChain.ChainContext,
+		coreumRecipient,
+	)
 	requireT.NoError(err)
-	requireT.NoError(coreumChain.AwaitForBalance(ctx, t, coreumIssuer, sendCoin))
+	requireT.NoError(coreumChain.AwaitForBalance(ctx, t, coreumRecipient, sendCoin))
 }
 
 func TestIBCGlobalFreeze(t *testing.T) {
@@ -653,7 +724,7 @@ func TestIBCGlobalFreeze(t *testing.T) {
 	gaiaChain := chains.Gaia
 
 	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 
 	coreumIssuer := coreumChain.GenAccount()
@@ -663,7 +734,7 @@ func TestIBCGlobalFreeze(t *testing.T) {
 
 	gaiaChain.Faucet.FundAccounts(ctx, t, integration.FundedAccount{
 		Address: gaiaRecipient,
-		Amount:  gaiaChain.NewCoin(sdkmath.NewInt(1000000)), // coin for the fees
+		Amount:  gaiaChain.NewCoin(sdkmath.NewInt(2000000)), // coin for the fees
 	})
 
 	issueFee := coreumChain.QueryAssetFTParams(ctx, t).IssueFee.Amount
@@ -736,16 +807,40 @@ func TestIBCGlobalFreeze(t *testing.T) {
 	require.NoError(t, err)
 
 	// send minted coins to gaia from the other account, should fail due to global freeze
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumSender, sendCoin, gaiaChain.ChainContext, gaiaRecipient)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumSender,
+		sendCoin,
+		gaiaChain.ChainContext,
+		gaiaRecipient,
+	)
 	requireT.ErrorContains(err, assetfttypes.ErrGloballyFrozen.Error())
 
 	// send minted coins to gaia from issuer, should succeed despite global freeze
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumIssuer, sendCoin, gaiaChain.ChainContext, gaiaRecipient)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumIssuer,
+		sendCoin,
+		gaiaChain.ChainContext,
+		gaiaRecipient,
+	)
 	requireT.NoError(err)
 	requireT.NoError(gaiaChain.AwaitForBalance(ctx, t, gaiaRecipient, ibcSendCoin))
 
 	// send coins back to issuer on coreum, it should fail
-	_, err = gaiaChain.ExecuteIBCTransfer(ctx, t, gaiaRecipient, ibcSendCoinBack, coreumChain.ChainContext, coreumIssuer)
+	_, err = gaiaChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		gaiaChain.TxFactoryAuto(),
+		gaiaRecipient,
+		ibcSendCoinBack,
+		coreumChain.ChainContext,
+		coreumIssuer,
+	)
 	requireT.NoError(err)
 	requireT.NoError(gaiaChain.AwaitForBalance(ctx, t, gaiaRecipient, ibcSendCoin))
 
@@ -755,11 +850,11 @@ func TestIBCGlobalFreeze(t *testing.T) {
 		Denom:   denom,
 	})
 	requireT.NoError(err)
-	requireT.Equal(sdk.NewCoin(denom, sdk.ZeroInt()).String(), balanceRes.Balance.String())
+	requireT.Equal(sdk.NewCoin(denom, sdkmath.ZeroInt()).String(), balanceRes.Balance.String())
 
 	// send coins back to recipient on coreum, it should fail
 	_, err = gaiaChain.ExecuteIBCTransfer(
-		ctx, t, gaiaRecipient, ibcSendCoinBack, coreumChain.ChainContext, coreumRecipient,
+		ctx, t, gaiaChain.TxFactoryAuto(), gaiaRecipient, ibcSendCoinBack, coreumChain.ChainContext, coreumRecipient,
 	)
 	requireT.NoError(err)
 	requireT.NoError(gaiaChain.AwaitForBalance(ctx, t, gaiaRecipient, ibcSendCoin))
@@ -769,7 +864,7 @@ func TestIBCGlobalFreeze(t *testing.T) {
 		Denom:   denom,
 	})
 	requireT.NoError(err)
-	requireT.Equal(sdk.NewCoin(denom, sdk.ZeroInt()).String(), balanceRes.Balance.String())
+	requireT.Equal(sdk.NewCoin(denom, sdkmath.ZeroInt()).String(), balanceRes.Balance.String())
 
 	// remove global freeze
 	unfreezeMsg := &assetfttypes.MsgGloballyUnfreeze{
@@ -786,17 +881,132 @@ func TestIBCGlobalFreeze(t *testing.T) {
 
 	// send coins back to issuer on coreum again, it should succeed
 	_, err = gaiaChain.ExecuteIBCTransfer(
-		ctx, t, gaiaRecipient, ibcSendCoinBack, coreumChain.ChainContext, coreumIssuer,
+		ctx, t, gaiaChain.TxFactoryAuto(), gaiaRecipient, ibcSendCoinBack, coreumChain.ChainContext, coreumIssuer,
 	)
 	requireT.NoError(err)
 	requireT.NoError(coreumChain.AwaitForBalance(ctx, t, coreumIssuer, sendCoinBack))
 
 	// send coins back to recipient on coreum again, it should succeed
 	_, err = gaiaChain.ExecuteIBCTransfer(
-		ctx, t, gaiaRecipient, ibcSendCoinBack, coreumChain.ChainContext, coreumRecipient,
+		ctx, t, gaiaChain.TxFactoryAuto(), gaiaRecipient, ibcSendCoinBack, coreumChain.ChainContext, coreumRecipient,
 	)
 	requireT.NoError(err)
 	requireT.NoError(coreumChain.AwaitForBalance(ctx, t, coreumRecipient, sendCoinBack))
+}
+
+func TestIBCAssetFTClawback(t *testing.T) {
+	t.Parallel()
+
+	ctx, chains := integrationtests.NewChainsTestingContext(t)
+	requireT := require.New(t)
+	assertT := assert.New(t)
+	coreumChain := chains.Coreum
+	gaiaChain := chains.Gaia
+
+	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
+	)
+
+	coreumIssuer := coreumChain.GenAccount()
+	coreumSender := coreumChain.GenAccount()
+	gaiaRecipient := gaiaChain.GenAccount()
+
+	gaiaChain.Faucet.FundAccounts(ctx, t, integration.FundedAccount{
+		Address: gaiaRecipient,
+		Amount:  gaiaChain.NewCoin(sdkmath.NewInt(1000000)), // coin for the fees
+	})
+
+	issueFee := coreumChain.QueryAssetFTParams(ctx, t).IssueFee.Amount
+	coreumChain.FundAccountWithOptions(ctx, t, coreumIssuer, integration.BalancesOptions{
+		Messages: []sdk.Msg{
+			&assetfttypes.MsgIssue{},
+			&banktypes.MsgSend{},
+			&assetfttypes.MsgClawback{},
+		},
+		Amount: issueFee,
+	})
+	coreumChain.FundAccountWithOptions(ctx, t, coreumSender, integration.BalancesOptions{
+		Messages: []sdk.Msg{
+			&ibctransfertypes.MsgTransfer{},
+			&ibctransfertypes.MsgTransfer{},
+		},
+	})
+
+	issueMsg := &assetfttypes.MsgIssue{
+		Issuer:        coreumIssuer.String(),
+		Symbol:        "mysymbol",
+		Subunit:       "mysubunit",
+		Precision:     8,
+		InitialAmount: sdkmath.NewInt(1_000_000),
+		Features: []assetfttypes.Feature{
+			assetfttypes.Feature_block_smart_contracts,
+			assetfttypes.Feature_ibc,
+			assetfttypes.Feature_clawback,
+		},
+	}
+	_, err := client.BroadcastTx(
+		ctx,
+		coreumChain.ClientContext.WithFromAddress(coreumIssuer),
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(issueMsg)),
+		issueMsg,
+	)
+	require.NoError(t, err)
+	denom := assetfttypes.BuildDenom(issueMsg.Subunit, coreumIssuer)
+
+	sendCoin := sdk.NewCoin(denom, sdkmath.NewInt(1000))
+	halfCoin := sdk.NewCoin(denom, sdkmath.NewInt(500))
+	msgSend := &banktypes.MsgSend{
+		FromAddress: coreumIssuer.String(),
+		ToAddress:   coreumSender.String(),
+		Amount:      sdk.NewCoins(sendCoin),
+	}
+	_, err = client.BroadcastTx(
+		ctx,
+		coreumChain.ClientContext.WithFromAddress(coreumIssuer),
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(msgSend)),
+		msgSend,
+	)
+	requireT.NoError(err)
+
+	clawbackMsg := &assetfttypes.MsgClawback{
+		Sender:  coreumIssuer.String(),
+		Account: coreumSender.String(),
+		Coin:    halfCoin,
+	}
+	_, err = client.BroadcastTx(
+		ctx,
+		coreumChain.ClientContext.WithFromAddress(coreumIssuer),
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(clawbackMsg)),
+		clawbackMsg,
+	)
+	require.NoError(t, err)
+
+	// send more than allowed, should fail
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumSender,
+		sendCoin,
+		gaiaChain.ChainContext,
+		gaiaRecipient,
+	)
+	requireT.Error(err)
+	assertT.Contains(err.Error(), cosmoserrors.ErrInsufficientFunds.Error())
+
+	// send up to the limit, should succeed
+	ibcCoin := sdk.NewCoin(ConvertToIBCDenom(gaiaToCoreumChannelID, denom), halfCoin.Amount)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumSender,
+		halfCoin,
+		gaiaChain.ChainContext,
+		gaiaRecipient,
+	)
+	requireT.NoError(err)
+	requireT.NoError(gaiaChain.AwaitForBalance(ctx, t, gaiaRecipient, ibcCoin))
 }
 
 func TestIBCAssetFTTimedOutTransfer(t *testing.T) {
@@ -808,10 +1018,10 @@ func TestIBCAssetFTTimedOutTransfer(t *testing.T) {
 	gaiaChain := chains.Osmosis
 
 	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 
-	retryCtx, retryCancel := context.WithTimeout(ctx, 2*time.Minute)
+	retryCtx, retryCancel := context.WithTimeout(ctx, 5*integration.AwaitStateTimeout)
 	defer retryCancel()
 
 	// This is the retry loop where we try to trigger a timeout condition for IBC transfer.
@@ -854,7 +1064,13 @@ func TestIBCAssetFTTimedOutTransfer(t *testing.T) {
 		sendToGaiaCoin := sdk.NewCoin(denom, issueMsg.InitialAmount)
 
 		_, err = coreumChain.ExecuteTimingOutIBCTransfer(
-			ctx, t, coreumSender, sendToGaiaCoin, gaiaChain.ChainContext, gaiaRecipient,
+			ctx,
+			t,
+			coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+			coreumSender,
+			sendToGaiaCoin,
+			gaiaChain.ChainContext,
+			gaiaRecipient,
 		)
 		switch {
 		case err == nil:
@@ -933,7 +1149,7 @@ func TestIBCAssetFTRejectedTransfer(t *testing.T) {
 	gaiaChain := chains.Gaia
 
 	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 
 	// Bank module rejects transfers targeting some module accounts. We use this feature to test that
@@ -952,7 +1168,7 @@ func TestIBCAssetFTRejectedTransfer(t *testing.T) {
 	})
 	gaiaChain.Faucet.FundAccounts(ctx, t, integration.FundedAccount{
 		Address: gaiaRecipient,
-		Amount:  gaiaChain.NewCoin(sdk.NewIntFromUint64(100000)),
+		Amount:  gaiaChain.NewCoin(sdkmath.NewIntFromUint64(1000000)),
 	})
 
 	issueMsg := &assetfttypes.MsgIssue{
@@ -977,7 +1193,15 @@ func TestIBCAssetFTRejectedTransfer(t *testing.T) {
 	denom := assetfttypes.BuildDenom(issueMsg.Subunit, coreumSender)
 	sendToGaiaCoin := sdk.NewCoin(denom, issueMsg.InitialAmount)
 
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumSender, sendToGaiaCoin, gaiaChain.ChainContext, moduleAddress)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumSender,
+		sendToGaiaCoin,
+		gaiaChain.ChainContext,
+		moduleAddress,
+	)
 	requireT.NoError(err)
 
 	// funds should be returned to coreum
@@ -1000,11 +1224,27 @@ func TestIBCAssetFTRejectedTransfer(t *testing.T) {
 	})
 
 	sendToCoreumCoin := sdk.NewCoin(ibcGaiaDenom, sendToGaiaCoin.Amount)
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumSender, sendToGaiaCoin, gaiaChain.ChainContext, gaiaRecipient)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumSender,
+		sendToGaiaCoin,
+		gaiaChain.ChainContext,
+		gaiaRecipient,
+	)
 	requireT.NoError(err)
 	requireT.NoError(gaiaChain.AwaitForBalance(ctx, t, gaiaRecipient, sendToCoreumCoin))
 
-	_, err = gaiaChain.ExecuteIBCTransfer(ctx, t, gaiaRecipient, sendToCoreumCoin, coreumChain.ChainContext, moduleAddress)
+	_, err = gaiaChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		gaiaChain.TxFactoryAuto(),
+		gaiaRecipient,
+		sendToCoreumCoin,
+		coreumChain.ChainContext,
+		moduleAddress,
+	)
 	requireT.NoError(err)
 
 	// funds should be returned to gaia
@@ -1076,7 +1316,7 @@ func TestIBCRejectedTransferWithWhitelistingAndFreezing(t *testing.T) {
 	sendCoin := sdk.NewCoin(denom, issueMsg.InitialAmount)
 
 	coreumToGaiaChannelID := coreumChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, gaiaChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, gaiaChain.ChainContext,
 	)
 
 	// freeze escrow account
@@ -1137,7 +1377,15 @@ func TestIBCRejectedTransferWithWhitelistingAndFreezing(t *testing.T) {
 	require.NoError(t, err)
 
 	// send coins from sender to blocked address on gaia
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumSender, sendCoin, gaiaChain.ChainContext, moduleAddress)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumSender,
+		sendCoin,
+		gaiaChain.ChainContext,
+		moduleAddress,
+	)
 	requireT.NoError(err)
 
 	// gaia should reject the IBC transfers and funds should be returned back to coreum, despite:
@@ -1155,10 +1403,10 @@ func TestIBCTimedOutTransferWithWhitelistingAndFreezing(t *testing.T) {
 	gaiaChain := chains.Gaia
 
 	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 
-	retryCtx, retryCancel := context.WithTimeout(ctx, 2*time.Minute)
+	retryCtx, retryCancel := context.WithTimeout(ctx, 5*integration.AwaitStateTimeout)
 	defer retryCancel()
 
 	// This is the retry loop where we try to trigger a timeout condition for IBC transfer.
@@ -1212,7 +1460,7 @@ func TestIBCTimedOutTransferWithWhitelistingAndFreezing(t *testing.T) {
 		sendToGaiaCoin := sdk.NewCoin(denom, issueMsg.InitialAmount)
 
 		coreumToGaiaChannelID := coreumChain.AwaitForIBCChannelID(
-			ctx, t, ibctransfertypes.PortID, gaiaChain.ChainSettings.ChainID,
+			ctx, t, ibctransfertypes.PortID, gaiaChain.ChainContext,
 		)
 
 		// freeze escrow account
@@ -1273,7 +1521,13 @@ func TestIBCTimedOutTransferWithWhitelistingAndFreezing(t *testing.T) {
 		require.NoError(t, err)
 
 		_, err = coreumChain.ExecuteTimingOutIBCTransfer(
-			ctx, t, coreumSender, sendToGaiaCoin, gaiaChain.ChainContext, gaiaRecipient,
+			ctx,
+			t,
+			coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+			coreumSender,
+			sendToGaiaCoin,
+			gaiaChain.ChainContext,
+			gaiaRecipient,
 		)
 		switch {
 		case err == nil:
@@ -1372,8 +1626,8 @@ func TestIBCRejectedTransferWithBurnRateAndSendCommission(t *testing.T) {
 			assetfttypes.Feature_block_smart_contracts,
 			assetfttypes.Feature_ibc,
 		},
-		BurnRate:           sdk.MustNewDecFromStr("0.1"),
-		SendCommissionRate: sdk.MustNewDecFromStr("0.2"),
+		BurnRate:           sdkmath.LegacyMustNewDecFromStr("0.1"),
+		SendCommissionRate: sdkmath.LegacyMustNewDecFromStr("0.2"),
 	}
 	_, err := client.BroadcastTx(
 		ctx,
@@ -1402,11 +1656,19 @@ func TestIBCRejectedTransferWithBurnRateAndSendCommission(t *testing.T) {
 	// We send everything except amount required to cover burn rate and send commission.
 	sendCoin := sdk.NewCoin(
 		denom,
-		sdk.NewDecFromInt(issueMsg.InitialAmount).
-			Quo(sdk.OneDec().Add(issueMsg.BurnRate).Add(issueMsg.SendCommissionRate)).
+		sdkmath.LegacyNewDecFromInt(issueMsg.InitialAmount).
+			Quo(sdkmath.LegacyOneDec().Add(issueMsg.BurnRate).Add(issueMsg.SendCommissionRate)).
 			TruncateInt(),
 	)
-	_, err = coreumChain.ExecuteIBCTransfer(ctx, t, coreumSender, sendCoin, gaiaChain.ChainContext, moduleAddress)
+	_, err = coreumChain.ExecuteIBCTransfer(
+		ctx,
+		t,
+		coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+		coreumSender,
+		sendCoin,
+		gaiaChain.ChainContext,
+		moduleAddress,
+	)
 	requireT.NoError(err)
 
 	// Gaia should reject the IBC transfers and funds should be returned back to Coreum.
@@ -1417,7 +1679,7 @@ func TestIBCRejectedTransferWithBurnRateAndSendCommission(t *testing.T) {
 
 	// Balance on escrow address should be 0.
 	coreumToGaiaChannelID := coreumChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, gaiaChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, gaiaChain.ChainContext,
 	)
 	coreumToGaiaEscrowAddress := ibctransfertypes.GetEscrowAddress(ibctransfertypes.PortID, coreumToGaiaChannelID)
 	bankClient := banktypes.NewQueryClient(coreumChain.ClientContext)
@@ -1438,10 +1700,10 @@ func TestIBCTimedOutTransferWithBurnRateAndSendCommission(t *testing.T) {
 	gaiaChain := chains.Gaia
 
 	gaiaToCoreumChannelID := gaiaChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 
-	retryCtx, retryCancel := context.WithTimeout(ctx, 2*time.Minute)
+	retryCtx, retryCancel := context.WithTimeout(ctx, 5*integration.AwaitStateTimeout)
 	defer retryCancel()
 
 	// This is the retry loop where we try to trigger a timeout condition for IBC transfer.
@@ -1478,8 +1740,8 @@ func TestIBCTimedOutTransferWithBurnRateAndSendCommission(t *testing.T) {
 				assetfttypes.Feature_block_smart_contracts,
 				assetfttypes.Feature_ibc,
 			},
-			BurnRate:           sdk.MustNewDecFromStr("0.1"),
-			SendCommissionRate: sdk.MustNewDecFromStr("0.2"),
+			BurnRate:           sdkmath.LegacyMustNewDecFromStr("0.1"),
+			SendCommissionRate: sdkmath.LegacyMustNewDecFromStr("0.2"),
 		}
 		_, err := client.BroadcastTx(
 			ctx,
@@ -1507,14 +1769,20 @@ func TestIBCTimedOutTransferWithBurnRateAndSendCommission(t *testing.T) {
 		// Send coins from sender to Gaia.
 		// We send everything except amount required to cover burn rate and send commission.
 		sendCoin := sdk.NewCoin(denom,
-			sdk.
-				NewDecFromInt(issueMsg.InitialAmount).
-				Quo(sdk.OneDec().Add(issueMsg.BurnRate).Add(issueMsg.SendCommissionRate)).
+			sdkmath.
+				LegacyNewDecFromInt(issueMsg.InitialAmount).
+				Quo(sdkmath.LegacyOneDec().Add(issueMsg.BurnRate).Add(issueMsg.SendCommissionRate)).
 				TruncateInt(),
 		)
 
 		_, err = coreumChain.ExecuteTimingOutIBCTransfer(
-			ctx, t, coreumSender, sendCoin, gaiaChain.ChainContext, gaiaRecipient,
+			ctx,
+			t,
+			coreumChain.TxFactory().WithGas(coreumChain.GasLimitByMsgs(&ibctransfertypes.MsgTransfer{})),
+			coreumSender,
+			sendCoin,
+			gaiaChain.ChainContext,
+			gaiaRecipient,
 		)
 		switch {
 		case err == nil:
@@ -1572,7 +1840,7 @@ func TestIBCTimedOutTransferWithBurnRateAndSendCommission(t *testing.T) {
 
 		// Balance on escrow address should be 0.
 		coreumToGaiaChannelID := coreumChain.AwaitForIBCChannelID(
-			ctx, t, ibctransfertypes.PortID, gaiaChain.ChainSettings.ChainID,
+			ctx, t, ibctransfertypes.PortID, gaiaChain.ChainContext,
 		)
 		coreumToGaiaEscrowAddress := ibctransfertypes.GetEscrowAddress(ibctransfertypes.PortID, coreumToGaiaChannelID)
 		bankClient := banktypes.NewQueryClient(coreumChain.ClientContext)
@@ -1592,6 +1860,7 @@ func ibcTransferAndAssertBalanceChanges(
 	ctx context.Context,
 	t *testing.T,
 	srcChainCtx integration.ChainContext,
+	srcChainTxf client.Factory,
 	srcSender sdk.AccAddress,
 	sendCoin sdk.Coin,
 	dstChainCtx integration.ChainContext,
@@ -1619,7 +1888,7 @@ func ibcTransferAndAssertBalanceChanges(
 	requireT.NoError(err)
 	dstChainRecipientBalanceExpected := dstChainRecipientBalanceBefore.Balance.Add(receiveCoin)
 
-	_, err = srcChainCtx.ExecuteIBCTransfer(ctx, t, srcSender, sendCoin, dstChainCtx, dstChainRecipient)
+	_, err = srcChainCtx.ExecuteIBCTransfer(ctx, t, srcChainTxf, srcSender, sendCoin, dstChainCtx, dstChainRecipient)
 	requireT.NoError(err)
 	requireT.NoError(dstChainCtx.AwaitForBalance(ctx, t, dstChainRecipient, dstChainRecipientBalanceExpected))
 

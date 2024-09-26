@@ -59,12 +59,27 @@ TotalGas = {{ .FixedGas }} +  max(0, ({{ .TxBaseGas }} - 1 * {{ .SigVerifyCost }
 
 #### Example 2
 Let's say we have a transaction with 2 messages of type
-`/coreum.asset.ft.v1.MsgIssueGasPrice` inside, also there are 2
+`/coreum.asset.ft.v1.MsgIssue` inside, also there are 2
 signatures and the tx size is 2050 bytes, total will be:
 
 `
 TotalGas = {{ .FixedGas }} +  max(0, ({{ .TxBaseGas }} - 2 * {{ .SigVerifyCost }} + 2050 * {{ .TxSizeCostPerByte }})) + 2 * {{ .MsgIssueGasPrice }}
 `
+
+## Extensions
+If one of the follwoing messages contains a token which have the extension feature enabled, it will not be considered deterministic any more . The reason is that extensions invlove smart contract calls which are nondeterministic in nature. 
+
+ - `/ibc.applications.transfer.v1.MsgTransfer`
+ - `/coreum.asset.ft.v1.MsgIssue`
+ - `/cosmos.bank.v1beta1.MsgSend`
+ - `/cosmos.bank.v1beta1.MsgMultiSend`
+ - `/cosmos.distribution.v1beta1.MsgCommunityPoolSpend`
+ - `/cosmos.distribution.v1beta1.MsgFundCommunityPool`
+ - `/cosmos.vesting.v1beta1.MsgCreatePeriodicVestingAccount`
+ - `/cosmos.vesting.v1beta1.MsgCreatePermanentLockedAccount`	
+ - `/cosmos.vesting.v1beta1.MsgCreateVestingAccount`        		
+
+It should also be mentioned that this rule applies for all the messages inside `/cosmos.authz.v1beta1.MsgExec`
 
 ## Gas Tables
 
@@ -96,11 +111,17 @@ Real examples of special case tests could be found [here](https://github.com/Cor
 
 `bankMultiSendPerOperationGas` is currently equal to `{{ .BankMultiSendPerOperationsGas }}`.
 
-##### `/cosmos.authz.v1beta1.MsgExec`
+##### `/cosmos.authz.v1beta1.MsgGrant`
+MsgGrant is deterministic with gas value of `{{ .MsgGrantBaseGas}}`, but if the authorization type is
+one of the following, then it gets an overhead for every byte of the authorization.
+The authorization types with overhead are:
+- `/coreum.assert.nft.SendAuthorization`
+- `/coreum.assert.ft.MintAuthorization`
+- `/coreum.assert.ft.BurnAuthorization`
 
-`DeterministicGasForMsg = authzMsgExecOverhead + Sum(DeterministicGas(ChildMsg))`
+and the formula for them is
+`DeterministicGas = MsgGrantBaseGas + Size(Authorization) * WriteCostPerByte `
 
-`authzMsgExecOverhead` is currently equal to `{{ .AuthzExecOverhead }}`.
 
 ##### `/coreum.asset.nft.v1.MsgIssueClass`
 

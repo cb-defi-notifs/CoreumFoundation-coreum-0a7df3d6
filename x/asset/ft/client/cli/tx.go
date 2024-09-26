@@ -24,16 +24,21 @@ import (
 
 // Flags defined on transactions.
 const (
-	FeaturesFlag           = "features"
-	BurnRateFlag           = "burn-rate"
-	SendCommissionRateFlag = "send-commission-rate"
-	IBCEnabledFlag         = "ibc-enabled"
-	MintLimitFlag          = "mint-limit"
-	BurnLimitFlag          = "burn-limit"
-	ExpirationFlag         = "expiration"
-	RecipientFlag          = "recipient"
-	URIFlag                = "uri"
-	URIHashFlag            = "uri_hash"
+	FeaturesFlag             = "features"
+	BurnRateFlag             = "burn-rate"
+	SendCommissionRateFlag   = "send-commission-rate"
+	IBCEnabledFlag           = "ibc-enabled"
+	MintLimitFlag            = "mint-limit"
+	BurnLimitFlag            = "burn-limit"
+	ExpirationFlag           = "expiration"
+	RecipientFlag            = "recipient"
+	URIFlag                  = "uri"
+	URIHashFlag              = "uri_hash"
+	ExtensionCodeIDFlag      = "extension_code_id"
+	ExtensionLabelFlag       = "extension_label"
+	ExtensionFundsFlag       = "extension_funds"
+	ExtensionIssuanceMsgFlag = "extension_issuance_msg"
+	DEXUnifiedRefAmountFlag  = "dex-unified-ref-amount"
 )
 
 // GetTxCmd returns the transaction commands for this module.
@@ -55,9 +60,13 @@ func GetTxCmd() *cobra.Command {
 		CmdTxSetFrozen(),
 		CmdTxGloballyFreeze(),
 		CmdTxGloballyUnfreeze(),
+		CmdTxClawback(),
 		CmdTxSetWhitelistedLimit(),
+		CmdTxTransferAdmin(),
+		CmdTxClearAdmin(),
 		CmdTxUpgradeV1(),
 		CmdGrantAuthorization(),
+		CmdUpdateDEXSettings(),
 	)
 
 	return cmd
@@ -74,7 +83,7 @@ func CmdTxIssue() *cobra.Command {
 	sort.Strings(allowedFeatures)
 	cmd := &cobra.Command{
 		//nolint:lll // breaking this down will make it look worse when printed to user screen.
-		Use:   "issue [symbol] [subunit] [precision] [initial_amount] [description] --from [issuer] --features=" + strings.Join(allowedFeatures, ",") + " --burn-rate=0.12 --send-commission-rate=0.2 --uri https://my-token-meta.invalid/1 --uri_hash e000624",
+		Use:   fmt.Sprintf("issue [symbol] [subunit] [precision] [initial_amount] [description] --from [issuer] --features="+strings.Join(allowedFeatures, ",")+" --burn-rate=0.12 --send-commission-rate=0.2 --uri https://my-token-meta.invalid/1 --uri_hash e000624 --extension_code_id=1 --extension_label=my-extension --extension_funds=100000ABC-%s --extension_instantiation_msg={}", constant.AddressSampleTest),
 		Args:  cobra.ExactArgs(5),
 		Short: "Issue new fungible token",
 		Long: strings.TrimSpace(
@@ -115,25 +124,25 @@ $ %s tx %s issue WBTC wsatoshi 8 100000 "Wrapped Bitcoin Token" --from [issuer]
 				return errors.WithStack(err)
 			}
 
-			burnRate := sdk.NewDec(0)
+			burnRate := sdkmath.LegacyNewDec(0)
 			burnRateStr, err := cmd.Flags().GetString(BurnRateFlag)
 			if err != nil {
 				return errors.WithStack(err)
 			}
 			if len(burnRateStr) > 0 {
-				burnRate, err = sdk.NewDecFromStr(burnRateStr)
+				burnRate, err = sdkmath.LegacyNewDecFromStr(burnRateStr)
 				if err != nil {
 					return errors.Wrapf(err, "invalid burn-rate")
 				}
 			}
 
-			sendCommissionRate := sdk.NewDec(0)
+			sendCommissionRate := sdkmath.LegacyNewDec(0)
 			sendCommissionFeeStr, err := cmd.Flags().GetString(SendCommissionRateFlag)
 			if err != nil {
 				return errors.WithStack(err)
 			}
 			if len(sendCommissionFeeStr) > 0 {
-				sendCommissionRate, err = sdk.NewDecFromStr(sendCommissionFeeStr)
+				sendCommissionRate, err = sdkmath.LegacyNewDecFromStr(sendCommissionFeeStr)
 				if err != nil {
 					return errors.Wrapf(err, "invalid send-commission-rate")
 				}
@@ -158,6 +167,55 @@ $ %s tx %s issue WBTC wsatoshi 8 100000 "Wrapped Bitcoin Token" --from [issuer]
 				return errors.WithStack(err)
 			}
 
+			var extensionSettings *types.ExtensionIssueSettings
+			extensionCodeID, err := cmd.Flags().GetUint64(ExtensionCodeIDFlag)
+			if err != nil {
+				return errors.WithStack(err)
+			}
+			//nolint:nestif // The optional params should not be parsed if the main param does not exist
+			if extensionCodeID > 0 {
+				extensionSettings = &types.ExtensionIssueSettings{CodeId: extensionCodeID}
+
+				extensionSettings.Label, err = cmd.Flags().GetString(ExtensionLabelFlag)
+				if err != nil {
+					return errors.WithStack(err)
+				}
+
+				extensionFunds, err := cmd.Flags().GetString(ExtensionFundsFlag)
+				if err != nil {
+					return errors.WithStack(err)
+				}
+
+				if len(extensionFunds) > 0 {
+					extensionSettings.Funds, err = sdk.ParseCoinsNormalized(extensionFunds)
+					if err != nil {
+						return sdkerrors.Wrap(err, "invalid amount")
+					}
+				}
+
+				extensionIssuanceMsg, err := cmd.Flags().GetString(ExtensionIssuanceMsgFlag)
+				if err != nil {
+					return errors.WithStack(err)
+				}
+
+				extensionSettings.IssuanceMsg = []byte(extensionIssuanceMsg)
+			}
+
+			var dexSettings *types.DEXSettings
+			unifiedRefAmountStr, err := cmd.Flags().GetString(DEXUnifiedRefAmountFlag)
+			if err != nil {
+				return errors.WithStack(err)
+			}
+			if len(unifiedRefAmountStr) > 0 {
+				unifiedRefAmount, err := sdkmath.LegacyNewDecFromStr(unifiedRefAmountStr)
+				if err != nil {
+					return errors.Wrapf(err, "invalid %s value", DEXUnifiedRefAmountFlag)
+				}
+				dexSettings = &types.DEXSettings{
+					UnifiedRefAmount: unifiedRefAmount,
+				}
+			}
+
 			msg := &types.MsgIssue{
 				Issuer:             issuer.String(),
 				Symbol:             symbol,
@@ -170,6 +228,8 @@ $ %s tx %s issue WBTC wsatoshi 8 100000 "Wrapped Bitcoin Token" --from [issuer]
 				SendCommissionRate: sendCommissionRate,
 				URI:                uri,
 				URIHash:            uriHash,
+				ExtensionSettings:  extensionSettings,
+				DEXSettings:        dexSettings,
 			}
 
 			return tx.GenerateOrBroadcastTxCLI(clientCtx, cmd.Flags(), msg)
@@ -183,6 +243,14 @@ $ %s tx %s issue WBTC wsatoshi 8 100000 "Wrapped Bitcoin Token" --from [issuer]
 	cmd.Flags().String(SendCommissionRateFlag, "0", "Indicates the rate at which coins will be sent to the issuer on top of the sent amount in every send action. Must be between 0 and 1.")
 	cmd.Flags().String(URIFlag, "", "Token URI.")
 	cmd.Flags().String(URIHashFlag, "", "Token URI hash.")
+	//nolint:lll // breaking this down will make it look worse when printed to user screen.
+	cmd.Flags().Uint64(ExtensionCodeIDFlag, 0, "CodeID of the stored WASM smart contract to be used as the asset extension.")
+	cmd.Flags().String(ExtensionLabelFlag, "", "Optional label to be given to the extension contract.")
+	cmd.Flags().String(ExtensionFundsFlag, "", "Coins that are transferred to the contract on instantiation.")
+	//nolint:lll // breaking this down will make it look worse when printed to user screen.
+	cmd.Flags().String(ExtensionIssuanceMsgFlag, "{}", "Optional json encoded data to pass to WASM on instantiation by the ft issuer.")
+	//nolint:lll // breaking this down will make it look worse when printed to user screen.
+	cmd.Flags().String(DEXUnifiedRefAmountFlag, "", "DEX unified ref amount is the approximate amount you need to by 1USD, used to define the price tick size.")
 
 	flags.AddTxFlagsToCmd(cmd)
 
@@ -415,6 +483,50 @@ $ %s tx %s set-frozen [account_address] 100000ABC-%s --from [sender]
 	return cmd
 }
 
+// CmdTxClawback returns Clawback cobra command.
+//
+//nolint:dupl // most code is identical, but reusing logic is not beneficial here.
+func CmdTxClawback() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "clawback [account_address] [amount] --from [sender]",
+		Args:  cobra.ExactArgs(2),
+		Short: "Confiscates any amount of fungible token from the specific account",
+		Long: strings.TrimSpace(
+			fmt.Sprintf(`Confiscate a portion of fungible token.
+
+Example:
+$ %s tx %s clawback [account_address] 100000ABC-%s --from [sender]
+`,
+				version.AppName, types.ModuleName, constant.AddressSampleTest,
+			),
+		),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clientCtx, err := client.GetClientTxContext(cmd)
+			if err != nil {
+				return errors.WithStack(err)
+			}
+
+			sender := clientCtx.GetFromAddress()
+			account := args[0]
+			amount, err := sdk.ParseCoinNormalized(args[1])
+			if err != nil {
+				return sdkerrors.Wrap(err, "invalid amount")
+			}
+
+			msg := &types.MsgClawback{
+				Sender:  sender.String(),
+				Account: account,
+				Coin:    amount,
+			}
+			return tx.GenerateOrBroadcastTxCLI(clientCtx, cmd.Flags(), msg)
+		},
+	}
+
+	flags.AddTxFlagsToCmd(cmd)
+
+	return cmd
+}
+
 // CmdTxSetWhitelistedLimit returns SetWhitelistedLimit cobra command.
 //
 //nolint:dupl // most code is identical, but reusing logic is not beneficial here.
@@ -523,6 +635,90 @@ $ %s tx %s globally-unfreeze ABC-%s --from [sender]
 			denom := args[0]
 
 			msg := &types.MsgGloballyUnfreeze{
+				Sender: sender.String(),
+				Denom:  denom,
+			}
+			return tx.GenerateOrBroadcastTxCLI(clientCtx, cmd.Flags(), msg)
+		},
+	}
+
+	flags.AddTxFlagsToCmd(cmd)
+
+	return cmd
+}
+
+// CmdTxTransferAdmin returns TransferAdmin cobra command.
+func CmdTxTransferAdmin() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "transfer-admin [account_address] [denom] --from [sender]",
+		Args:  cobra.ExactArgs(2),
+		Short: "Change admin of a fungible token to the specific account",
+		Long: strings.TrimSpace(
+			fmt.Sprintf(`Change admin of a fungible token.
+
+Example:
+$ %s tx %s transfer-admin [account_address] ABC-%s --from [sender]
+`,
+				version.AppName, types.ModuleName, constant.AddressSampleTest,
+			),
+		),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clientCtx, err := client.GetClientTxContext(cmd)
+			if err != nil {
+				return errors.WithStack(err)
+			}
+
+			sender := clientCtx.GetFromAddress()
+			account := args[0]
+			denom := args[1]
+			err = sdk.ValidateDenom(denom)
+			if err != nil {
+				return sdkerrors.Wrap(err, "invalid denom")
+			}
+
+			msg := &types.MsgTransferAdmin{
+				Sender:  sender.String(),
+				Account: account,
+				Denom:   denom,
+			}
+			return tx.GenerateOrBroadcastTxCLI(clientCtx, cmd.Flags(), msg)
+		},
+	}
+
+	flags.AddTxFlagsToCmd(cmd)
+
+	return cmd
+}
+
+// CmdTxClearAdmin returns ClearAdmin cobra command.
+func CmdTxClearAdmin() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "clear-admin [denom] --from [sender]",
+		Args:  cobra.ExactArgs(1),
+		Short: "Remove admin of a fungible token",
+		Long: strings.TrimSpace(
+			fmt.Sprintf(`Remove admin of a fungible token.
+
+Example:
+$ %s tx %s clear-admin ABC-%s --from [sender]
+`,
+				version.AppName, types.ModuleName, constant.AddressSampleTest,
+			),
+		),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clientCtx, err := client.GetClientTxContext(cmd)
+			if err != nil {
+				return errors.WithStack(err)
+			}
+
+			sender := clientCtx.GetFromAddress()
+			denom := args[0]
+			err = sdk.ValidateDenom(denom)
+			if err != nil {
+				return sdkerrors.Wrap(err, "invalid denom")
+			}
+
+			msg := &types.MsgClearAdmin{
 				Sender: sender.String(),
 				Denom:  denom,
 			}
@@ -654,6 +850,52 @@ $ %s tx grant <grantee_addr> burn --burn-limit 100ucore --expiration 1667979596
 	cmd.Flags().Int64(ExpirationFlag, 0, "Expire time as Unix timestamp. Set zero (0) for no expiry.")
 	cmd.Flags().String(BurnLimitFlag, "", "The Amount that is allowed to be burnt.")
 	cmd.Flags().String(MintLimitFlag, "", "The Amount that is allowed to be minted.")
+	return cmd
+}
+
+// CmdUpdateDEXSettings returns UpdateDEXSettings cobra command.
+func CmdUpdateDEXSettings() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "update-dex-settings [denom] [unified_ref_price] --from [sender]",
+		Args:  cobra.ExactArgs(2),
+		Short: "Update DEX settings",
+		Long: strings.TrimSpace(
+			fmt.Sprintf(`Update DEX settings.
+Example:
+$ %s tx %s update-dex-settings ABC-%s 1000.5 --from [sender]
+`,
+				version.AppName, types.ModuleName, constant.AddressSampleTest,
+			),
+		),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			clientCtx, err := client.GetClientTxContext(cmd)
+			if err != nil {
+				return errors.WithStack(err)
+			}
+
+			sender := clientCtx.GetFromAddress()
+			denom := args[0]
+			if err = sdk.ValidateDenom(denom); err != nil {
+				return sdkerrors.Wrap(err, "invalid denom")
+			}
+			unifiedRefAmount, err := sdkmath.LegacyNewDecFromStr(args[1])
+			if err != nil {
+				return errors.Wrapf(err, "invalid %s value", DEXUnifiedRefAmountFlag)
+			}
+
+			msg := &types.MsgUpdateDEXSettings{
+				Sender: sender.String(),
+				Denom:  denom,
+				DEXSettings: types.DEXSettings{
+					UnifiedRefAmount: unifiedRefAmount,
+				},
+			}
+			return tx.GenerateOrBroadcastTxCLI(clientCtx, cmd.Flags(), msg)
+		},
+	}
+
+	flags.AddTxFlagsToCmd(cmd)
+
 	return cmd
 }
 

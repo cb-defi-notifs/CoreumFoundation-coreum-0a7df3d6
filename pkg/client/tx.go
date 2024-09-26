@@ -14,8 +14,9 @@ import (
 	sdkerrors "cosmossdk.io/errors"
 	"github.com/cometbft/cometbft/mempool"
 	tmtypes "github.com/cometbft/cometbft/types"
+	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/client/flags"
-	"github.com/cosmos/cosmos-sdk/client/grpc/tmservice"
+	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
 	"github.com/cosmos/cosmos-sdk/client/tx"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/multisig"
@@ -55,6 +56,46 @@ func BroadcastTx(ctx context.Context, clientCtx Context, txf Factory, msgs ...sd
 	if err != nil {
 		return nil, err
 	}
+	unsignedTx, err := GenerateUnsignedTx(ctx, clientCtx, txf, msgs...)
+	if err != nil {
+		return nil, err
+	}
+
+	// in case the name is not provided by that address, take the name by the address
+	fromName := clientCtx.FromName()
+	if fromName == "" && len(clientCtx.FromAddress()) > 0 {
+		key, err := clientCtx.Keyring().KeyByAddress(clientCtx.FromAddress())
+		if err != nil {
+			return nil, errors.Wrapf(
+				err,
+				"failed to get key by the address %q from the keyring",
+				clientCtx.FromAddress().String(),
+			)
+		}
+		fromName = key.Name
+	}
+
+	err = tx.Sign(ctx, txf, fromName, unsignedTx, true)
+	if err != nil {
+		return nil, err
+	}
+
+	txBytes, err := clientCtx.TxConfig().TxEncoder()(unsignedTx.GetTx())
+	if err != nil {
+		return nil, err
+	}
+
+	return BroadcastRawTx(ctx, clientCtx, txBytes)
+}
+
+// GenerateUnsignedTx generates an unsigned tx.
+func GenerateUnsignedTx(
+	ctx context.Context, clientCtx Context, txf Factory, msgs ...sdk.Msg,
+) (client.TxBuilder, error) {
+	txf, err := prepareFactory(ctx, clientCtx, txf)
+	if err != nil {
+		return nil, err
+	}
 
 	if txf.SimulateAndExecute() {
 		gasPrice, err := GetGasPrice(ctx, clientCtx)
@@ -78,28 +119,7 @@ func BroadcastTx(ctx context.Context, clientCtx Context, txf Factory, msgs ...sd
 	}
 
 	unsignedTx.SetFeeGranter(clientCtx.FeeGranterAddress())
-
-	// in case the name is not provided by that address, take the name by the address
-	fromName := clientCtx.FromName()
-	if fromName == "" && len(clientCtx.FromAddress()) > 0 {
-		key, err := clientCtx.Keyring().KeyByAddress(clientCtx.FromAddress())
-		if err != nil {
-			return nil, errors.Errorf("failed to get key by the address %q from the keyring", clientCtx.FromAddress().String())
-		}
-		fromName = key.Name
-	}
-
-	err = tx.Sign(txf, fromName, unsignedTx, true)
-	if err != nil {
-		return nil, err
-	}
-
-	txBytes, err := clientCtx.TxConfig().TxEncoder()(unsignedTx.GetTx())
-	if err != nil {
-		return nil, err
-	}
-
-	return BroadcastRawTx(ctx, clientCtx, txBytes)
+	return unsignedTx, nil
 }
 
 // CalculateGas simulates the execution of a transaction and returns the
@@ -113,9 +133,36 @@ func CalculateGas(
 	txf Factory,
 	msgs ...sdk.Msg,
 ) (*sdktx.SimulateResponse, uint64, error) {
-	txf, err := prepareFactory(ctx, clientCtx, txf)
+	txBytes, err := BuildTxForSimulation(ctx, clientCtx, txf, msgs...)
 	if err != nil {
 		return nil, 0, err
+	}
+
+	txSvcClient := sdktx.NewServiceClient(clientCtx)
+	simRes, err := txSvcClient.Simulate(ctx, &sdktx.SimulateRequest{
+		TxBytes: txBytes,
+	})
+	if err != nil {
+		return nil, 0, errors.Wrap(err, "transaction estimation failed")
+	}
+
+	if txf.GasAdjustment() == 0 {
+		txf = txf.WithGasAdjustment(clientCtx.GasAdjustment())
+	}
+
+	return simRes, uint64(txf.GasAdjustment() * float64(simRes.GasInfo.GasUsed)), nil
+}
+
+// BuildTxForSimulation build transaction for the gas simulation.
+func BuildTxForSimulation(
+	ctx context.Context,
+	clientCtx Context,
+	txf Factory,
+	msgs ...sdk.Msg,
+) ([]byte, error) {
+	txf, err := prepareFactory(ctx, clientCtx, txf)
+	if err != nil {
+		return nil, err
 	}
 	if txf.GasAdjustment() == 0 {
 		txf = txf.WithGasAdjustment(clientCtx.GasAdjustment())
@@ -123,14 +170,14 @@ func CalculateGas(
 
 	keyInfo, err := txf.Keybase().KeyByAddress(clientCtx.FromAddress())
 	if err != nil {
-		return nil, 0, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
 	msgsAny := make([]*codectypes.Any, 0, len(msgs))
 	for _, msg := range msgs {
 		msgAny, err := codectypes.NewAnyWithValue(msg)
 		if err != nil {
-			return nil, 0, errors.WithStack(err)
+			return nil, errors.WithStack(err)
 		}
 		msgsAny = append(msgsAny, msgAny)
 	}
@@ -140,12 +187,12 @@ func CalculateGas(
 		Memo:     txf.Memo(),
 	})
 	if err != nil {
-		return nil, 0, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
 	pubKey, err := keyInfo.GetPubKey()
 	if err != nil {
-		return nil, 0, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 	var signatureData signing.SignatureData
 	if multisigPubKey, ok := pubKey.(*multisig.LegacyAminoPubKey); ok {
@@ -177,7 +224,7 @@ func CalculateGas(
 		Fee: &sdktx.Fee{},
 	})
 	if err != nil {
-		return nil, 0, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
 	txBytes, err := proto.Marshal(&sdktx.TxRaw{
@@ -188,18 +235,10 @@ func CalculateGas(
 		},
 	})
 	if err != nil {
-		return nil, 0, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
-	txSvcClient := sdktx.NewServiceClient(clientCtx)
-	simRes, err := txSvcClient.Simulate(ctx, &sdktx.SimulateRequest{
-		TxBytes: txBytes,
-	})
-	if err != nil {
-		return nil, 0, errors.Wrap(err, "transaction estimation failed")
-	}
-
-	return simRes, uint64(txf.GasAdjustment() * float64(simRes.GasInfo.GasUsed)), nil
+	return txBytes, nil
 }
 
 // BroadcastRawTx broadcast the txBytes using the clientCtx and set BroadcastMode.
@@ -240,7 +279,7 @@ func GetAccountInfo(
 	ctx context.Context,
 	clientCtx Context,
 	address sdk.AccAddress,
-) (authtypes.AccountI, error) {
+) (sdk.AccountI, error) {
 	req := &authtypes.QueryAccountRequest{
 		Address: address.String(),
 	}
@@ -250,7 +289,7 @@ func GetAccountInfo(
 		return nil, errors.WithStack(err)
 	}
 
-	var acc authtypes.AccountI
+	var acc sdk.AccountI
 	if err := clientCtx.InterfaceRegistry().UnpackAny(res.Account, &acc); err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -294,43 +333,32 @@ func AwaitTx(
 		return nil, err
 	}
 
+	if blocksToWait := clientCtx.config.TimeoutConfig.TxNumberOfBlocksToWait; blocksToWait > 0 {
+		if err := AwaitTargetHeight(ctx, clientCtx, int64(blocksToWait)+txResponse.Height); err != nil {
+			return nil, err
+		}
+	}
+
 	return txResponse, nil
 }
 
-// AwaitNextBlocks waits for next blocks.
-func AwaitNextBlocks(
-	ctx context.Context,
-	clientCtx Context,
-	nextBlocks int64,
-) error {
-	tmQueryClient := tmservice.NewServiceClient(clientCtx)
+// AwaitTargetHeight waits for target block.
+func AwaitTargetHeight(ctx context.Context, clientCtx Context, targetHeight int64) error {
+	tmQueryClient := cmtservice.NewServiceClient(clientCtx)
 	timeoutCtx, cancel := context.WithTimeout(ctx, clientCtx.config.TimeoutConfig.TxNextBlocksTimeout)
 	defer cancel()
 
-	heightToStart := int64(0)
 	return retry.Do(timeoutCtx, clientCtx.config.TimeoutConfig.TxNextBlocksPollInterval, func() error {
 		requestCtx, cancel := context.WithTimeout(ctx, clientCtx.config.TimeoutConfig.RequestTimeout)
 		defer cancel()
 
-		res, err := tmQueryClient.GetLatestBlock(requestCtx, &tmservice.GetLatestBlockRequest{})
+		res, err := tmQueryClient.GetLatestBlock(requestCtx, &cmtservice.GetLatestBlockRequest{})
 		if err != nil {
 			return retry.Retryable(errors.WithStack(err))
 		}
 
-		var currentHeight int64
-		if res.SdkBlock != nil {
-			currentHeight = res.SdkBlock.Header.Height
-		} else {
-			// TODO(v4): Remove this in v4 version of cored. Now it is needed because we might
-			// still use it in integration tests together with v2 cored binary.
-			currentHeight = res.Block.Header.Height //nolint:staticcheck // Yes, we know that this is deprecated
-		}
+		currentHeight := blockHeightFromResponse(res)
 
-		if heightToStart == 0 {
-			heightToStart = currentHeight
-		}
-
-		targetHeight := heightToStart + nextBlocks
 		if currentHeight < targetHeight {
 			return retry.Retryable(errors.Errorf(
 				"target block: %d hasn't been reached yet, current: %d",
@@ -340,6 +368,44 @@ func AwaitNextBlocks(
 
 		return nil
 	})
+}
+
+// AwaitNextBlocks waits for next blocks.
+func AwaitNextBlocks(
+	ctx context.Context,
+	clientCtx Context,
+	nextBlocks int64,
+) error {
+	tmQueryClient := cmtservice.NewServiceClient(clientCtx)
+	timeoutCtx, cancel := context.WithTimeout(ctx, clientCtx.config.TimeoutConfig.TxNextBlocksTimeout)
+	defer cancel()
+
+	heightToStart := int64(0)
+	err := retry.Do(timeoutCtx, clientCtx.config.TimeoutConfig.TxNextBlocksPollInterval, func() error {
+		requestCtx, cancel := context.WithTimeout(ctx, clientCtx.config.TimeoutConfig.RequestTimeout)
+		defer cancel()
+
+		res, err := tmQueryClient.GetLatestBlock(requestCtx, &cmtservice.GetLatestBlockRequest{})
+		if err != nil {
+			return retry.Retryable(errors.WithStack(err))
+		}
+
+		heightToStart = blockHeightFromResponse(res)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	return AwaitTargetHeight(timeoutCtx, clientCtx, heightToStart+nextBlocks)
+}
+
+func blockHeightFromResponse(res *cmtservice.GetLatestBlockResponse) int64 {
+	if res.SdkBlock != nil {
+		return res.SdkBlock.Header.Height
+	}
+
+	return res.Block.Header.Height //nolint:staticcheck // we keep it to keep the compatibility with old versions
 }
 
 // GetGasPrice returns the current gas price of the chain.

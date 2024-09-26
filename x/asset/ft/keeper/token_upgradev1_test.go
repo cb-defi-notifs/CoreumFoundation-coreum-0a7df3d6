@@ -6,23 +6,23 @@ import (
 
 	sdkmath "cosmossdk.io/math"
 	tmproto "github.com/cometbft/cometbft/proto/tendermint/types"
-	"github.com/cosmos/cosmos-sdk/codec"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/ed25519"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/gogoproto/proto"
 	"github.com/stretchr/testify/require"
 
-	"github.com/CoreumFoundation/coreum/v4/app"
 	"github.com/CoreumFoundation/coreum/v4/pkg/config"
 	"github.com/CoreumFoundation/coreum/v4/testutil/simapp"
+	assetft "github.com/CoreumFoundation/coreum/v4/x/asset/ft"
 	"github.com/CoreumFoundation/coreum/v4/x/asset/ft/types"
 )
 
 func TestTokenUpgradeV1(t *testing.T) {
 	requireT := require.New(t)
 
-	cdc := config.NewEncodingConfig(app.ModuleBasics).Codec
+	cdc := config.NewEncodingConfig(assetft.AppModuleBasic{}).Codec
 	testApp := simapp.New()
-	ctxSDK := testApp.BaseApp.NewContext(false, tmproto.Header{})
+	ctxSDK := testApp.BaseApp.NewContextLegacy(false, tmproto.Header{})
 
 	ftKeeper := testApp.AssetFTKeeper
 	delayKeeper := testApp.DelayKeeper
@@ -114,10 +114,10 @@ func TestTokenUpgradeV1(t *testing.T) {
 	delayedItems, err = delayKeeper.ExportDelayedItems(ctxSDK)
 	requireT.NoError(err)
 	requireT.Len(delayedItems, 1)
-	requireT.Equal("assetft-upgrade-1-"+denom2, delayedItems[0].Id)
+	requireT.Equal("assetft-upgrade-1-"+denom2, delayedItems[0].ID)
 	requireT.Equal(ctxSDK.BlockTime().Add(params.TokenUpgradeGracePeriod), delayedItems[0].ExecutionTime)
 
-	var delayedItem codec.ProtoMarshaler
+	var delayedItem proto.Message
 	requireT.NoError(cdc.UnpackAny(delayedItems[0].Data, &delayedItem))
 
 	requireT.Equal(denom2, delayedItem.(*types.DelayedTokenUpgradeV1).Denom)

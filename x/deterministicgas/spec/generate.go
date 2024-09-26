@@ -9,7 +9,7 @@ import (
 	"strings"
 	"text/template"
 
-	storetypes "github.com/cosmos/cosmos-sdk/store/types"
+	storetypes "cosmossdk.io/store/types"
 	auth "github.com/cosmos/cosmos-sdk/x/auth/types"
 
 	assetfttypes "github.com/CoreumFoundation/coreum/v4/x/asset/ft/types"
@@ -90,7 +90,7 @@ func main() {
 		MsgIssueGasPrice              uint64
 		BankSendPerCoinGas            uint64
 		BankMultiSendPerOperationsGas uint64
-		AuthzExecOverhead             uint64
+		MsgGrantBaseGas               uint64
 		NFTMsgIssueClassCost          uint64
 		NFTMsgMintCost                uint64
 
@@ -113,7 +113,7 @@ func main() {
 		MsgIssueGasPrice:              msgIssueGasPrice,
 		BankSendPerCoinGas:            deterministicgas.BankSendPerCoinGas,
 		BankMultiSendPerOperationsGas: deterministicgas.BankMultiSendPerOperationsGas,
-		AuthzExecOverhead:             deterministicgas.AuthzExecOverhead,
+		MsgGrantBaseGas:               deterministicgas.MsgGrantBaseGas,
 		NFTMsgIssueClassCost:          deterministicgas.NFTIssueClassBaseGas,
 		NFTMsgMintCost:                deterministicgas.NFTMintBaseGas,
 

@@ -35,7 +35,7 @@ func TestStakingProposalParamChange(t *testing.T) {
 
 	// Create new proposer.
 	proposer := chain.GenAccount()
-	proposerBalance, err := chain.Governance.ComputeProposerBalance(ctx)
+	proposerBalance, err := chain.Governance.ComputeProposerBalance(ctx, false)
 	requireT.NoError(err)
 
 	chain.Faucet.FundAccounts(ctx, t, integration.NewFundedAccount(proposer, proposerBalance))
@@ -51,7 +51,7 @@ func TestStakingProposalParamChange(t *testing.T) {
 	targetParams.MaxEntries = 2 * paramsBeforeUpgrade.Params.MaxEntries
 	targetParams.MaxValidators = 2 * paramsBeforeUpgrade.Params.MaxValidators
 	targetParams.MinCommissionRate = paramsBeforeUpgrade.Params.MinCommissionRate.Add(
-		sdk.NewDecWithPrec(int64(1), int64(2)),
+		sdkmath.LegacyNewDecWithPrec(int64(1), int64(2)),
 	)
 	targetParams.UnbondingTime = 2 * paramsBeforeUpgrade.Params.UnbondingTime
 
@@ -67,6 +67,7 @@ func TestStakingProposalParamChange(t *testing.T) {
 		"Change all params in staking module",
 		"Change all params in staking module",
 		"Change all params in staking module",
+		false,
 	)
 	requireT.NoError(err)
 
@@ -289,7 +290,8 @@ func TestValidatorCreationWithLowMinSelfDelegation(t *testing.T) {
 // TestValidatorUpdateWithLowMinSelfDelegation checks validator can update its parameters even if the new min self
 // delegation is higher than current validator self delegation.
 func TestValidatorUpdateWithLowMinSelfDelegation(t *testing.T) {
-	t.Parallel()
+	// Since this test changes global staking config we can't run it in parallel with other tests.
+	// That's why t.Parallel() is not here.
 
 	ctx, chain := integrationtests.NewCoreumTestingContext(t)
 
@@ -476,7 +478,7 @@ func setUnbondingTimeViaGovernance(
 
 	// Create new proposer.
 	proposer := chain.GenAccount()
-	proposerBalance, err := chain.Governance.ComputeProposerBalance(ctx)
+	proposerBalance, err := chain.Governance.ComputeProposerBalance(ctx, false)
 	requireT.NoError(err)
 
 	chain.Faucet.FundAccounts(ctx, t, integration.NewFundedAccount(proposer, proposerBalance))
@@ -502,6 +504,7 @@ func setUnbondingTimeViaGovernance(
 		fmt.Sprintf("Change the unbnunbondingdig time to %s", unbondingTime.String()),
 		"Changing unbonding time for the integration test",
 		"Changing unbonding time for the integration test",
+		false,
 	)
 	requireT.NoError(err)
 

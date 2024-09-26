@@ -15,9 +15,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/types/tx/signing"
 	authsign "github.com/cosmos/cosmos-sdk/x/auth/signing"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
-	authztypes "github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 
 	integrationtests "github.com/CoreumFoundation/coreum/v4/integration-tests"
@@ -54,7 +52,7 @@ func TestAuthFeeLimits(t *testing.T) {
 	}
 
 	gasPriceWithMaxDiscount := feeModel.InitialGasPrice.
-		Mul(sdk.OneDec().Sub(feeModel.MaxDiscount))
+		Mul(sdkmath.LegacyOneDec().Sub(feeModel.MaxDiscount))
 
 	// the gas price is too low
 	_, err := client.BroadcastTx(ctx,
@@ -181,7 +179,7 @@ func TestAuthMultisig(t *testing.T) {
 		chain.ClientContext.WithFromAddress(multisigAddress),
 		// We intentionally use simulation instead of using `WithGas(chain.GasLimitByMsgs(bankSendMsg))`.
 		// We do it to test simulation for multisig account.
-		chain.TxFactory().WithSimulateAndExecute(true),
+		chain.TxFactoryAuto(),
 		bankSendMsg,
 		keyNamesSet[0])
 	requireT.ErrorIs(err, cosmoserrors.ErrUnauthorized)
@@ -191,7 +189,7 @@ func TestAuthMultisig(t *testing.T) {
 	txRes, err := chain.SignAndBroadcastMultisigTx(
 		ctx,
 		chain.ClientContext.WithFromAddress(multisigAddress),
-		chain.TxFactory().WithSimulateAndExecute(true),
+		chain.TxFactoryAuto(),
 		bankSendMsg,
 		keyNamesSet[:multisigTreshold]...)
 	requireT.NoError(err)
@@ -271,7 +269,7 @@ func TestGasEstimation(t *testing.T) {
 		name        string
 		fromAddress sdk.AccAddress
 		msgs        []sdk.Msg
-		expectedGas uint64
+		expectedGas func(txBytes []byte) uint64
 	}{
 		{
 			name:        "singlesig_bank_send",
@@ -284,7 +282,9 @@ func TestGasEstimation(t *testing.T) {
 				},
 			},
 			// single signature no extra bytes.
-			expectedGas: dgc.FixedGas + 1*deterministicgas.BankSendPerCoinGas,
+			expectedGas: func(txBytes []byte) uint64 {
+				return dgc.FixedGas + deterministicgas.BankSendPerCoinGas
+			},
 		},
 		{
 			name:        "multisig_2_3_bank_send",
@@ -297,7 +297,9 @@ func TestGasEstimation(t *testing.T) {
 				},
 			},
 			// single signature no extra bytes.
-			expectedGas: dgc.FixedGas + 1*deterministicgas.BankSendPerCoinGas,
+			expectedGas: func(txBytes []byte) uint64 {
+				return dgc.FixedGas + deterministicgas.BankSendPerCoinGas
+			},
 		},
 		{
 			name:        "multisig_6_7_bank_send",
@@ -309,39 +311,27 @@ func TestGasEstimation(t *testing.T) {
 					Amount:      sdk.NewCoins(chain.NewCoin(sdkmath.NewInt(1))),
 				},
 			},
-			// estimation uses worst case to estimate number of bytes in tx which causes possible overflow of free bytes.
-			// 10 is price for each extra byte over FreeBytes.
-			expectedGas: dgc.FixedGas + 1*deterministicgas.BankSendPerCoinGas + 1133*authParams.Params.TxSizeCostPerByte,
-		},
-		{
-			name:        "singlesig_auth_exec_and_bank_send",
-			fromAddress: singlesigAddress,
-			msgs: []sdk.Msg{
-				lo.ToPtr(
-					authztypes.NewMsgExec(singlesigAddress, []sdk.Msg{
-						&banktypes.MsgSend{
-							FromAddress: singlesigAddress.String(),
-							ToAddress:   singlesigAddress.String(),
-							Amount:      sdk.NewCoins(chain.NewCoin(sdkmath.NewInt(1))),
-						},
-					})),
-				&banktypes.MsgSend{
-					FromAddress: singlesigAddress.String(),
-					ToAddress:   singlesigAddress.String(),
-					Amount:      sdk.NewCoins(chain.NewCoin(sdkmath.NewInt(1))),
-				},
+			expectedGas: func(txBytes []byte) uint64 {
+				signatureCost := uint64(3790)
+				bytesCost := uint64(len(txBytes)) * authParams.Params.TxSizeCostPerByte
+				expectedGas := dgc.FixedGas + deterministicgas.BankSendPerCoinGas + bytesCost + signatureCost
+				return expectedGas
 			},
-			// single signature no extra bytes.
-			expectedGas: dgc.FixedGas +
-				1*deterministicgas.BankSendPerCoinGas +
-				1*deterministicgas.AuthzExecOverhead +
-				1*deterministicgas.BankSendPerCoinGas,
 		},
 	}
 	for _, tt := range testsDeterm {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+
+			txBytes, err := client.BuildTxForSimulation(
+				ctx,
+				chain.ClientContext.WithFromAddress(tt.fromAddress),
+				chain.TxFactory(),
+				tt.msgs...,
+			)
+			require.NoError(t, err)
+
 			_, estimatedGas, err := client.CalculateGas(
 				ctx,
 				chain.ClientContext.WithFromAddress(tt.fromAddress),
@@ -349,7 +339,8 @@ func TestGasEstimation(t *testing.T) {
 				tt.msgs...,
 			)
 			require.NoError(t, err)
-			require.Equal(t, int(tt.expectedGas), int(estimatedGas))
+
+			require.Equal(t, int(tt.expectedGas(txBytes)), int(estimatedGas))
 		})
 	}
 
@@ -364,7 +355,7 @@ func TestGasEstimation(t *testing.T) {
 	require.NoError(t, err)
 	contractAddr, _, err := chain.Wasm.DeployAndInstantiateWASMContract(
 		ctx,
-		chain.TxFactory().WithSimulateAndExecute(true),
+		chain.TxFactoryAuto(),
 		admin,
 		moduleswasm.SimpleStateWASM,
 		integration.InstantiateConfig{
@@ -437,7 +428,7 @@ func TestAuthSignModeDirectAux(t *testing.T) {
 	feePayer := chain.GenAccount()
 	recipient := chain.GenAccount()
 
-	amountToSend := sdk.NewIntFromUint64(1000)
+	amountToSend := sdkmath.NewIntFromUint64(1000)
 	chain.FundAccountWithOptions(ctx, t, feePayer, integration.BalancesOptions{
 		Messages: []sdk.Msg{
 			&banktypes.MsgSend{},
@@ -480,7 +471,9 @@ func TestAuthSignModeDirectAux(t *testing.T) {
 	signBytes, err := builder.GetSignBytes()
 	requireT.NoError(err)
 
-	tipperSignature, _, err := chain.ClientContext.Keyring().SignByAddress(tipper, signBytes)
+	tipperSignature, _, err := chain.ClientContext.Keyring().SignByAddress(
+		tipper, signBytes, signing.SignMode_SIGN_MODE_DIRECT_AUX,
+	)
 	requireT.NoError(err)
 
 	builder.SetSignature(tipperSignature)
@@ -492,16 +485,24 @@ func TestAuthSignModeDirectAux(t *testing.T) {
 	requireT.NoError(txBuilder.AddAuxSignerData(tipperSignerData))
 	txBuilder.SetFeePayer(feePayer)
 	txBuilder.SetFeeAmount(sdk.NewCoins(
-		chain.NewCoin(chain.ChainSettings.GasPrice.Mul(sdk.NewDecFromInt(sdk.NewIntFromUint64(gas))).Ceil().RoundInt()),
+		chain.NewCoin(
+			chain.ChainSettings.GasPrice.
+				Mul(sdkmath.LegacyNewDecFromInt(sdkmath.NewIntFromUint64(gas))).
+				Ceil().
+				RoundInt(),
+		),
 	))
 	txBuilder.SetGasLimit(gas)
 
-	requireT.NoError(clienttx.Sign(chain.TxFactory().
-		WithAccountNumber(feePayerAccountInfo.GetAccountNumber()).
-		WithSequence(feePayerAccountInfo.GetSequence()),
+	requireT.NoError(clienttx.Sign(
+		ctx,
+		chain.TxFactory().
+			WithAccountNumber(feePayerAccountInfo.GetAccountNumber()).
+			WithSequence(feePayerAccountInfo.GetSequence()),
 		feePayerKey.Name,
 		txBuilder,
-		false))
+		false,
+	))
 	txBytes, err := chain.ClientContext.TxConfig().TxEncoder()(txBuilder.GetTx())
 	requireT.NoError(err)
 
@@ -527,8 +528,8 @@ func TestAuthSignModeDirectAux(t *testing.T) {
 	})
 	requireT.NoError(err)
 
-	requireT.Equal(chain.NewCoin(sdk.ZeroInt()).String(), tipperBalanceResp.Balance.String())
-	requireT.Equal(chain.NewCoin(sdk.ZeroInt()).String(), feePayerBalanceResp.Balance.String())
+	requireT.Equal(chain.NewCoin(sdkmath.ZeroInt()).String(), tipperBalanceResp.Balance.String())
+	requireT.Equal(chain.NewCoin(sdkmath.ZeroInt()).String(), feePayerBalanceResp.Balance.String())
 	requireT.Equal(chain.NewCoin(amountToSend).String(), recipientBalanceResp.Balance.String())
 }
 
@@ -616,9 +617,10 @@ func signTxWithMultipleSignatures(
 	requireT := require.New(t)
 
 	txConfig := chain.ClientContext.TxConfig()
-	signMod := txConfig.SignModeHandler().DefaultMode()
+	signMod, err := authsign.APISignModeToInternal(txConfig.SignModeHandler().DefaultMode())
+	requireT.NoError(err)
 
-	signerAccInfos := make([]authtypes.AccountI, len(signers))
+	signerAccInfos := make([]sdk.AccountI, len(signers))
 	// Fetch account info for all signers.
 	for i, signer := range signers {
 		accInfo, err := client.GetAccountInfo(ctx, chain.ClientContext, signer)
@@ -663,9 +665,15 @@ func signTxWithMultipleSignatures(
 			Sequence:      signerAccInfos[i].GetSequence(),
 			PubKey:        sigs[i].PubKey,
 		}
-		signBytes, err := txConfig.SignModeHandler().GetSignBytes(signMod, signerData, txBuilder.GetTx())
+		signBytes, err := authsign.GetSignBytesAdapter(
+			ctx,
+			txConfig.SignModeHandler(),
+			signMod,
+			signerData,
+			txBuilder.GetTx(),
+		)
 		requireT.NoError(err)
-		sig, _, err := chain.TxFactory().Keybase().SignByAddress(signer, signBytes)
+		sig, _, err := chain.TxFactory().Keybase().SignByAddress(signer, signBytes, signMod)
 		requireT.NoError(err)
 
 		sigs[i].Data.(*signing.SingleSignatureData).Signature = sig

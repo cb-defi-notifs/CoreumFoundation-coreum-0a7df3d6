@@ -65,33 +65,58 @@ func InitGenesis(ctx sdk.Context, k keeper.Keeper, genState types.GenesisState) 
 		k.SetWhitelistedBalances(ctx, address, whitelistedBalance.Coins)
 	}
 
+	// Init dexLocked balances
+	for _, dexLockedBalance := range genState.DEXLockedBalances {
+		if err := types.ValidateAssetCoins(dexLockedBalance.Coins); err != nil {
+			panic(err)
+		}
+		address := sdk.MustAccAddressFromBech32(dexLockedBalance.Address)
+		k.SetDEXLockedBalances(ctx, address, dexLockedBalance.Coins)
+	}
+
 	// Init pending version upgrades
 	if err := k.ImportPendingTokenUpgrades(ctx, genState.PendingTokenUpgrades); err != nil {
 		panic(err)
+	}
+
+	for _, settings := range genState.DEXSettings {
+		k.SetDEXSettings(ctx, settings.Denom, settings.DEXSettings)
 	}
 }
 
 // ExportGenesis returns the asset module's exported genesis.
 func ExportGenesis(ctx sdk.Context, k keeper.Keeper) *types.GenesisState {
 	// Export fungible token definitions
-	tokens, _, err := k.GetTokens(ctx, &query.PageRequest{Limit: query.MaxLimit})
+	tokens, _, err := k.GetTokens(ctx, &query.PageRequest{Limit: query.PaginationMaxLimit})
 	if err != nil {
 		panic(err)
 	}
 
 	// Export frozen balances
-	frozenBalances, _, err := k.GetAccountsFrozenBalances(ctx, &query.PageRequest{Limit: query.MaxLimit})
+	frozenBalances, _, err := k.GetAccountsFrozenBalances(ctx, &query.PageRequest{Limit: query.PaginationMaxLimit})
 	if err != nil {
 		panic(err)
 	}
 
 	// Export whitelisted balances
-	whitelistedBalances, _, err := k.GetAccountsWhitelistedBalances(ctx, &query.PageRequest{Limit: query.MaxLimit})
+	whitelistedBalances, _, err := k.GetAccountsWhitelistedBalances(ctx,
+		&query.PageRequest{Limit: query.PaginationMaxLimit},
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	dexLockedBalances, _, err := k.GetAccountsDEXLockedBalances(ctx, &query.PageRequest{Limit: query.PaginationMaxLimit})
 	if err != nil {
 		panic(err)
 	}
 
 	pendingTokenUpgrades, err := k.ExportPendingTokenUpgrades(ctx)
+	if err != nil {
+		panic(err)
+	}
+
+	dexSettings, _, err := k.GetDEXSettingsWithDenoms(ctx, &query.PageRequest{Limit: query.PaginationMaxLimit})
 	if err != nil {
 		panic(err)
 	}
@@ -102,5 +127,7 @@ func ExportGenesis(ctx sdk.Context, k keeper.Keeper) *types.GenesisState {
 		FrozenBalances:       frozenBalances,
 		WhitelistedBalances:  whitelistedBalances,
 		PendingTokenUpgrades: pendingTokenUpgrades,
+		DEXLockedBalances:    dexLockedBalances,
+		DEXSettings:          dexSettings,
 	}
 }

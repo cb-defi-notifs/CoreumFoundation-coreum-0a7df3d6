@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
+	sdkmath "cosmossdk.io/math"
 	sdkclient "github.com/cosmos/cosmos-sdk/client"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/pkg/errors"
@@ -101,7 +101,7 @@ func init() {
 		}
 	}
 
-	queryCtx, queryCtxCancel := context.WithTimeout(ctx, getTestContextConfig().TimeoutConfig.RequestTimeout)
+	queryCtx, queryCtxCancel := context.WithTimeout(ctx, integration.DefaultClientContextConfig().TimeoutConfig.RequestTimeout)
 	defer queryCtxCancel()
 
 	// ********** Coreum **********
@@ -113,7 +113,7 @@ func init() {
 
 	coreumSettings := integration.QueryChainSettings(queryCtx, coreumGRPCClient)
 
-	coreumClientCtx := client.NewContext(getTestContextConfig(), app.ModuleBasics).
+	coreumClientCtx := client.NewContext(integration.DefaultClientContextConfig()).
 		WithGRPCClient(coreumGRPCClient)
 
 	coreumFeemodelParamsRes, err := feemodeltypes.
@@ -125,8 +125,12 @@ func init() {
 	coreumSettings.GasPrice = coreumFeemodelParamsRes.Params.Model.InitialGasPrice
 	coreumSettings.CoinType = constant.CoinType
 	coreumSettings.RPCAddress = coreumRPCAddress
-
-	config.SetSDKConfig(coreumSettings.AddressPrefix, constant.CoinType)
+	network, err := config.NetworkConfigByChainID(constant.ChainID(coreumSettings.ChainID))
+	if err != nil {
+		panic(errors.WithStack(err))
+	}
+	app.ChosenNetwork = network
+	network.SetSDKConfig()
 
 	coreumRPCClient, err := sdkclient.NewClientFromNode(coreumRPCAddress)
 	if err != nil {
@@ -161,8 +165,7 @@ func NewChainsTestingContext(t *testing.T) (context.Context, Chains) {
 		gaiaGRPClient, err := integration.DialGRPCClient(gaiaGRPCAddress)
 		require.NoError(t, err)
 		gaiaSettings := integration.QueryChainSettings(queryCtx, gaiaGRPClient)
-		gaiaSettings.GasPrice = sdk.MustNewDecFromStr("0.01")
-		gaiaSettings.GasAdjustment = 1.5
+		gaiaSettings.GasPrice = sdkmath.LegacyMustNewDecFromStr("1.0")
 		gaiaSettings.CoinType = sdk.CoinType // gaia coin type
 		gaiaSettings.RPCAddress = gaiaRPCAddress
 
@@ -182,8 +185,7 @@ func NewChainsTestingContext(t *testing.T) (context.Context, Chains) {
 		osmosisGRPClient, err := integration.DialGRPCClient(osmosisGRPCAddress)
 		require.NoError(t, err)
 		osmosisChainSettings := integration.QueryChainSettings(queryCtx, osmosisGRPClient)
-		osmosisChainSettings.GasPrice = sdk.MustNewDecFromStr("0.01")
-		osmosisChainSettings.GasAdjustment = 1.5
+		osmosisChainSettings.GasPrice = sdkmath.LegacyMustNewDecFromStr("0.01")
 		osmosisChainSettings.CoinType = sdk.CoinType // osmosis coin type
 		osmosisChainSettings.RPCAddress = osmosisRPCAddress
 
@@ -200,11 +202,4 @@ func NewChainsTestingContext(t *testing.T) (context.Context, Chains) {
 	})
 
 	return testCtx, chains
-}
-
-func getTestContextConfig() client.ContextConfig {
-	cfg := client.DefaultContextConfig()
-	cfg.TimeoutConfig.TxStatusPollInterval = 100 * time.Millisecond
-
-	return cfg
 }

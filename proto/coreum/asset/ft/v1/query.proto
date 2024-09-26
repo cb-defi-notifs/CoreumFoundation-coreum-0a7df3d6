@@ -56,6 +56,11 @@ service Query {
   rpc WhitelistedBalance(QueryWhitelistedBalanceRequest) returns (QueryWhitelistedBalanceResponse) {
     option (google.api.http).get = "/coreum/asset/ft/v1/accounts/{account}/balances/whitelisted/{denom}";
   }
+
+  // DEXSettings returns DEX settings of the denom.
+  rpc DEXSettings(QueryDEXSettingsRequest) returns (QueryDEXSettingsResponse) {
+    option (google.api.http).get = "/coreum/asset/ft/v1/tokens/{denom}/dex-settings";
+  }
 }
 
 // QueryParamsRequest defines the request type for querying x/asset/ft parameters.
@@ -106,23 +111,34 @@ message QueryBalanceRequest {
 message QueryBalanceResponse {
   // balance contains the balance with the queried account and denom
   string balance = 1 [
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Int",
+    (gogoproto.customtype) = "cosmossdk.io/math.Int",
     (gogoproto.nullable) = false
   ];
   // whitelisted is the whitelisted amount of the denom on the account.
   string whitelisted = 2 [
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Int",
+    (gogoproto.customtype) = "cosmossdk.io/math.Int",
     (gogoproto.nullable) = false
   ];
   // frozen is the frozen amount of the denom on the account.
   string frozen = 3 [
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Int",
+    (gogoproto.customtype) = "cosmossdk.io/math.Int",
     (gogoproto.nullable) = false
   ];
-  // locked is the balance locked by vesting.
+  // locked is the balance locked in vesting and DEX.
   string locked = 4 [
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Int",
+    (gogoproto.customtype) = "cosmossdk.io/math.Int",
     (gogoproto.nullable) = false
+  ];
+  // locked_in_vesting is the balance locked in bank vesting.
+  string locked_in_vesting = 5 [
+    (gogoproto.customtype) = "cosmossdk.io/math.Int",
+    (gogoproto.nullable) = false
+  ];
+  // locked_in_dex is the balance locked in DEX.
+  string locked_in_dex = 6 [
+    (gogoproto.customtype) = "cosmossdk.io/math.Int",
+    (gogoproto.nullable) = false,
+    (gogoproto.customname) = "LockedInDEX"
   ];
 }
 
@@ -182,4 +198,17 @@ message QueryWhitelistedBalanceRequest {
 message QueryWhitelistedBalanceResponse {
   // balance contains the whitelisted balance with the queried account and denom
   cosmos.base.v1beta1.Coin balance = 1 [(gogoproto.nullable) = false];
+}
+
+message QueryDEXSettingsRequest {
+  // denom specifies the denom onto which we query DEX settings
+  string denom = 1;
+}
+
+message QueryDEXSettingsResponse {
+  // dex_settings contains the DEX settings
+  DEXSettings dex_settings = 1 [
+    (gogoproto.customname) = "DEXSettings",
+    (gogoproto.nullable) = false
+  ];
 }

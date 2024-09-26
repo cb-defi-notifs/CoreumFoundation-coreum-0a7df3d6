@@ -5,16 +5,17 @@
 package ante
 
 import (
+	"cosmossdk.io/core/store"
 	sdkerrors "cosmossdk.io/errors"
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
-	storetypes "github.com/cosmos/cosmos-sdk/store/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
 	authante "github.com/cosmos/cosmos-sdk/x/auth/ante"
 	crisistypes "github.com/cosmos/cosmos-sdk/x/crisis/types"
-	ibcante "github.com/cosmos/ibc-go/v7/modules/core/ante"
-	ibckeeper "github.com/cosmos/ibc-go/v7/modules/core/keeper"
+	govkeeper "github.com/cosmos/cosmos-sdk/x/gov/keeper"
+	ibcante "github.com/cosmos/ibc-go/v8/modules/core/ante"
+	ibckeeper "github.com/cosmos/ibc-go/v8/modules/core/keeper"
 
 	authkeeper "github.com/CoreumFoundation/coreum/v4/x/auth/keeper"
 	"github.com/CoreumFoundation/coreum/v4/x/deterministicgas"
@@ -29,7 +30,8 @@ type HandlerOptions struct {
 	FeeModelKeeper         feemodelante.Keeper
 	WasmConfig             wasmtypes.WasmConfig
 	IBCKeeper              *ibckeeper.Keeper
-	WasmTXCounterStoreKey  storetypes.StoreKey
+	GovKeeper              *govkeeper.Keeper
+	WasmTXCounterStoreKey  store.KVStoreService
 }
 
 // NewAnteHandler returns an AnteHandler that checks and increments sequence
@@ -50,6 +52,10 @@ func NewAnteHandler(options HandlerOptions) (sdk.AnteHandler, error) {
 
 	if options.IBCKeeper == nil {
 		return nil, sdkerrors.Wrap(cosmoserrors.ErrLogic, "IBC keeper is required for ante builder")
+	}
+
+	if options.GovKeeper == nil {
+		return nil, sdkerrors.Wrap(cosmoserrors.ErrLogic, "Gov keeper is required for ante builder")
 	}
 
 	if options.SignModeHandler == nil {

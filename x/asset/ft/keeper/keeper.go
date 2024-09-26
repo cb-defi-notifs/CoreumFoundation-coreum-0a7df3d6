@@ -2,19 +2,23 @@ package keeper
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 
 	sdkerrors "cosmossdk.io/errors"
+	"cosmossdk.io/log"
 	sdkmath "cosmossdk.io/math"
-	"github.com/cometbft/cometbft/libs/log"
+	"cosmossdk.io/store/prefix"
+	storetypes "cosmossdk.io/store/types"
+	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	"github.com/cosmos/cosmos-sdk/codec"
-	"github.com/cosmos/cosmos-sdk/store/prefix"
-	storetypes "github.com/cosmos/cosmos-sdk/store/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"github.com/cosmos/cosmos-sdk/types/query"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
+	"github.com/pkg/errors"
 
 	"github.com/CoreumFoundation/coreum/v4/x/asset/ft/types"
 	"github.com/CoreumFoundation/coreum/v4/x/wasm"
@@ -22,14 +26,25 @@ import (
 	wibctransfertypes "github.com/CoreumFoundation/coreum/v4/x/wibctransfer/types"
 )
 
+// ExtensionInstantiateMsg is the message passed to the extension cosmwasm contract.
+// The contract must be able to properly process this message.
+//
+//nolint:tagliatelle // these will be exposed to rust and must be snake case.
+type ExtensionInstantiateMsg struct {
+	Denom       string                       `json:"denom"`
+	IssuanceMsg wasmtypes.RawContractMessage `json:"issuance_msg"`
+}
+
 // Keeper is the asset module keeper.
 type Keeper struct {
-	cdc         codec.BinaryCodec
-	storeKey    storetypes.StoreKey
-	bankKeeper  types.BankKeeper
-	delayKeeper types.DelayKeeper
-	wasmKeeper  cwasmtypes.WasmKeeper
-	authority   string
+	cdc                    codec.BinaryCodec
+	storeKey               storetypes.StoreKey
+	bankKeeper             types.BankKeeper
+	delayKeeper            types.DelayKeeper
+	wasmKeeper             cwasmtypes.WasmKeeper
+	wasmPermissionedKeeper types.WasmPermissionedKeeper
+	accountKeeper          types.AccountKeeper
+	authority              string
 }
 
 // NewKeeper creates a new instance of the Keeper.
@@ -39,15 +54,19 @@ func NewKeeper(
 	bankKeeper types.BankKeeper,
 	delayKeeper types.DelayKeeper,
 	wasmKeeper cwasmtypes.WasmKeeper,
+	wasmPermissionedKeeper types.WasmPermissionedKeeper,
+	accountKeeper types.AccountKeeper,
 	authority string,
 ) Keeper {
 	return Keeper{
-		cdc:         cdc,
-		storeKey:    storeKey,
-		bankKeeper:  bankKeeper,
-		delayKeeper: delayKeeper,
-		wasmKeeper:  wasmKeeper,
-		authority:   authority,
+		cdc:                    cdc,
+		storeKey:               storeKey,
+		bankKeeper:             bankKeeper,
+		delayKeeper:            delayKeeper,
+		wasmKeeper:             wasmKeeper,
+		wasmPermissionedKeeper: wasmPermissionedKeeper,
+		accountKeeper:          accountKeeper,
+		authority:              authority,
 	}
 }
 
@@ -168,6 +187,8 @@ func (k Keeper) Issue(ctx sdk.Context, settings types.IssueSettings) (string, er
 
 // IssueVersioned issues new fungible token and sets its version.
 // To be used only in unit tests !!!
+//
+//nolint:funlen // breaking down this function will make it less readable.
 func (k Keeper) IssueVersioned(ctx sdk.Context, settings types.IssueSettings, version uint32) (string, error) {
 	if err := types.ValidateSubunit(settings.Subunit); err != nil {
 		return "", sdkerrors.Wrapf(err, "provided subunit: %s", settings.Subunit)
@@ -223,6 +244,46 @@ func (k Keeper) IssueVersioned(ctx sdk.Context, settings types.IssueSettings, ve
 		Version:            version,
 		URI:                settings.URI,
 		URIHash:            settings.URIHash,
+		Admin:              settings.Issuer.String(),
+	}
+
+	if err := k.mintIfReceivable(ctx, definition, settings.InitialAmount, settings.Issuer); err != nil {
+		return "", err
+	}
+
+	if definition.IsFeatureEnabled(types.Feature_extension) {
+		if settings.ExtensionSettings == nil {
+			return "", types.ErrInvalidInput.Wrap("extension settings must be provided")
+		}
+
+		if len(settings.ExtensionSettings.IssuanceMsg) == 0 {
+			settings.ExtensionSettings.IssuanceMsg = []byte("{}")
+		}
+
+		instantiateMsgBytes, err := json.Marshal(ExtensionInstantiateMsg{
+			Denom:       denom,
+			IssuanceMsg: settings.ExtensionSettings.IssuanceMsg,
+		})
+		if err != nil {
+			return "", types.ErrInvalidInput.Wrapf("error marshalling ExtensionInstantiateMsg (%s)", err)
+		}
+
+		contractAddress, _, err := k.wasmPermissionedKeeper.Instantiate2(
+			ctx,
+			settings.ExtensionSettings.CodeId,
+			settings.Issuer,
+			settings.Issuer,
+			instantiateMsgBytes,
+			settings.ExtensionSettings.Label,
+			settings.ExtensionSettings.Funds,
+			ctx.BlockHeader().AppHash,
+			true,
+		)
+		if err != nil {
+			return "", sdkerrors.Wrapf(err, "error instantiating cw contract")
+		}
+
+		definition.ExtensionCWAddress = contractAddress.String()
 	}
 
 	if err := k.SetDenomMetadata(
@@ -239,8 +300,11 @@ func (k Keeper) IssueVersioned(ctx sdk.Context, settings types.IssueSettings, ve
 
 	k.SetDefinition(ctx, settings.Issuer, settings.Subunit, definition)
 
-	if err := k.mintIfReceivable(ctx, definition, settings.InitialAmount, settings.Issuer); err != nil {
-		return "", err
+	if settings.DEXSettings != nil {
+		if err := types.ValidateDEXSettings(*settings.DEXSettings); err != nil {
+			return "", err
+		}
+		k.SetDEXSettings(ctx, denom, *settings.DEXSettings)
 	}
 
 	if err := ctx.EventManager().EmitTypedEvent(&types.EventIssued{
@@ -256,6 +320,8 @@ func (k Keeper) IssueVersioned(ctx sdk.Context, settings types.IssueSettings, ve
 		SendCommissionRate: settings.SendCommissionRate,
 		URI:                settings.URI,
 		URIHash:            settings.URIHash,
+		Admin:              settings.Issuer.String(),
+		DEXSettings:        settings.DEXSettings,
 	}); err != nil {
 		return "", sdkerrors.Wrapf(types.ErrInvalidState, "failed to emit EventIssued event: %s", err)
 	}
@@ -312,6 +378,19 @@ func (k Keeper) SetDenomMetadata(
 		Symbol:  symbol,
 		URI:     uri,
 		URIHash: uriHash,
+	}
+
+	// in case the precision is zero, we cannot 2 zero exponents in denom units, so
+	// we are force to have single entry in denom units and also Display must be the
+	// same as Base.
+	if precision == 0 {
+		denomMetadata.DenomUnits = []*banktypes.DenomUnit{
+			{
+				Denom:    denom,
+				Exponent: uint32(0),
+			},
+		}
+		denomMetadata.Display = denom
 	}
 
 	if err := denomMetadata.Validate(); err != nil {
@@ -519,6 +598,31 @@ func (k Keeper) SetGlobalFreeze(ctx sdk.Context, denom string, frozen bool) {
 	ctx.KVStore(k.storeKey).Delete(types.CreateGlobalFreezeKey(denom))
 }
 
+// Clawback confiscates specified token from the specified account.
+func (k Keeper) Clawback(ctx sdk.Context, sender, addr sdk.AccAddress, coin sdk.Coin) error {
+	if !coin.IsPositive() {
+		return sdkerrors.Wrap(cosmoserrors.ErrInvalidCoins, "clawback amount should be positive")
+	}
+
+	if err := k.validateClawbackAllowed(ctx, sender, addr, coin); err != nil {
+		return err
+	}
+
+	if err := k.bankKeeper.SendCoins(ctx, addr, sender, sdk.NewCoins(coin)); err != nil {
+		return sdkerrors.Wrapf(err, "can't send coins from account %s to issuer %s", addr.String(), sender.String())
+	}
+
+	if err := ctx.EventManager().EmitTypedEvent(&types.EventAmountClawedBack{
+		Account: addr.String(),
+		Denom:   coin.Denom,
+		Amount:  coin.Amount,
+	}); err != nil {
+		return sdkerrors.Wrapf(types.ErrInvalidState, "failed to emit EventAmountClawedBack event: %s", err)
+	}
+
+	return nil
+}
+
 // SetWhitelistedBalance sets whitelisted limit for the account.
 func (k Keeper) SetWhitelistedBalance(ctx sdk.Context, sender, addr sdk.AccAddress, coin sdk.Coin) error {
 	if coin.IsNil() || coin.IsNegative() {
@@ -530,8 +634,8 @@ func (k Keeper) SetWhitelistedBalance(ctx sdk.Context, sender, addr sdk.AccAddre
 		return sdkerrors.Wrapf(err, "not able to get token info for denom:%s", coin.Denom)
 	}
 
-	if def.IsIssuer(addr) {
-		return sdkerrors.Wrap(cosmoserrors.ErrUnauthorized, "issuer's balance can't be whitelisted")
+	if def.IsAdmin(addr) {
+		return sdkerrors.Wrap(cosmoserrors.ErrUnauthorized, "admin's balance can't be whitelisted")
 	}
 
 	if err = def.CheckFeatureAllowed(sender, types.Feature_whitelisting); err != nil {
@@ -594,6 +698,286 @@ func (k Keeper) SetWhitelistedBalances(ctx sdk.Context, addr sdk.AccAddress, coi
 	}
 }
 
+// DEXLock locks specified token from the specified account.
+func (k Keeper) DEXLock(ctx sdk.Context, addr sdk.AccAddress, coin sdk.Coin) error {
+	// in the final implementation the `DEXLock` will accept lock reason struct from dex, to let assetft decide
+	// whether the locking is allowed. The same struct will be passed to the extensions smart contract.
+	if !coin.IsPositive() {
+		return sdkerrors.Wrap(cosmoserrors.ErrInvalidCoins, "DEX locking amount must be positive")
+	}
+
+	if err := k.dexLockingChecks(ctx, addr, coin); err != nil {
+		return err
+	}
+
+	dexLockedStore := k.dexLockedAccountBalanceStore(ctx, addr)
+	dexLockedBalance := dexLockedStore.Balance(coin.Denom)
+	newDEXLockedBalance := dexLockedBalance.Add(coin)
+	dexLockedStore.SetBalance(newDEXLockedBalance)
+
+	if err := ctx.EventManager().EmitTypedEvent(&types.EventDEXLockedAmountChanged{
+		Account:        addr.String(),
+		Denom:          coin.Denom,
+		PreviousAmount: dexLockedBalance.Amount,
+		CurrentAmount:  newDEXLockedBalance.Amount,
+	}); err != nil {
+		return sdkerrors.Wrapf(types.ErrInvalidState, "failed to emit EventDEXLockedAmountChanged event: %s", err)
+	}
+
+	return nil
+}
+
+// DEXUnlock unlocks specified tokens from the specified account.
+func (k Keeper) DEXUnlock(ctx sdk.Context, addr sdk.AccAddress, coin sdk.Coin) error {
+	if !coin.IsPositive() {
+		return sdkerrors.Wrap(cosmoserrors.ErrInvalidCoins, "DEX unlock amount should be positive")
+	}
+
+	dexLockedStore := k.dexLockedAccountBalanceStore(ctx, addr)
+	dexLockedBalance := dexLockedStore.Balance(coin.Denom)
+	if !dexLockedBalance.IsGTE(coin) {
+		return sdkerrors.Wrapf(cosmoserrors.ErrInsufficientFunds,
+			"DEX unlock request %s is greater than the available locked balance %s",
+			coin.String(),
+			dexLockedBalance.String(),
+		)
+	}
+
+	newDEXLockedBalance := dexLockedBalance.Sub(coin)
+	dexLockedStore.SetBalance(newDEXLockedBalance)
+
+	if err := ctx.EventManager().EmitTypedEvent(&types.EventDEXLockedAmountChanged{
+		Account:        addr.String(),
+		Denom:          coin.Denom,
+		PreviousAmount: dexLockedBalance.Amount,
+		CurrentAmount:  newDEXLockedBalance.Amount,
+	}); err != nil {
+		return sdkerrors.Wrapf(types.ErrInvalidState, "failed to emit EventDEXLockedAmountChanged event: %s", err)
+	}
+
+	return nil
+}
+
+// DEXUnlockAndSend unlock the coin on the `fromAddr` balance and send to the `toAddr`.
+func (k Keeper) DEXUnlockAndSend(ctx sdk.Context, fromAddr, toAddr sdk.AccAddress, coin sdk.Coin) error {
+	if err := k.DEXUnlock(ctx, fromAddr, coin); err != nil {
+		return err
+	}
+	if err := k.bankKeeper.SendCoins(ctx, fromAddr, toAddr, sdk.NewCoins(coin)); err != nil {
+		return sdkerrors.Wrap(err, "failed to send DEX unlocked coins")
+	}
+
+	return nil
+}
+
+// GetDEXLockedBalance returns the DEX locked balance.
+func (k Keeper) GetDEXLockedBalance(ctx sdk.Context, addr sdk.AccAddress, denom string) sdk.Coin {
+	return k.dexLockedAccountBalanceStore(ctx, addr).Balance(denom)
+}
+
+// GetDEXLockedBalances returns the DEX locked balances of an account.
+func (k Keeper) GetDEXLockedBalances(
+	ctx sdk.Context,
+	addr sdk.AccAddress,
+	pagination *query.PageRequest,
+) (sdk.Coins, *query.PageResponse, error) {
+	return k.dexLockedAccountBalanceStore(ctx, addr).Balances(pagination)
+}
+
+// GetAccountsDEXLockedBalances returns the DEX locked balance on all the account.
+func (k Keeper) GetAccountsDEXLockedBalances(
+	ctx sdk.Context,
+	pagination *query.PageRequest,
+) ([]types.Balance, *query.PageResponse, error) {
+	return collectBalances(k.cdc, k.dexLockedBalancesStore(ctx), pagination)
+}
+
+// SetDEXLockedBalances sets the DEX locked balances of a specified account.
+// Pay attention that the sdk.NewCoins() sanitizes/removes the empty coins, hence if you
+// need set zero amount use the slice []sdk.Coins.
+func (k Keeper) SetDEXLockedBalances(ctx sdk.Context, addr sdk.AccAddress, coins sdk.Coins) {
+	dexLockedStore := k.dexLockedAccountBalanceStore(ctx, addr)
+	for _, coin := range coins {
+		dexLockedStore.SetBalance(coin)
+	}
+}
+
+// GetSpendableBalance returns balance allowed to be spendable.
+func (k Keeper) GetSpendableBalance(
+	ctx sdk.Context,
+	addr sdk.AccAddress,
+	denom string,
+) sdk.Coin {
+	balance := k.bankKeeper.GetBalance(ctx, addr, denom)
+	if balance.Amount.IsZero() {
+		return balance
+	}
+
+	notLockedAmt := balance.Amount.
+		Sub(k.GetDEXLockedBalance(ctx, addr, denom).Amount).
+		Sub(k.bankKeeper.LockedCoins(ctx, addr).AmountOf(denom))
+	if notLockedAmt.IsNegative() {
+		return sdk.NewCoin(denom, sdkmath.ZeroInt())
+	}
+
+	notFrozenAmt := balance.Amount.Sub(k.GetFrozenBalance(ctx, addr, denom).Amount)
+	if notFrozenAmt.IsNegative() {
+		return sdk.NewCoin(denom, sdkmath.ZeroInt())
+	}
+
+	spendableAmount := sdkmath.MinInt(notLockedAmt, notFrozenAmt)
+	return sdk.NewCoin(denom, spendableAmount)
+}
+
+// TransferAdmin changes admin of a fungible token.
+func (k Keeper) TransferAdmin(ctx sdk.Context, sender, addr sdk.AccAddress, denom string) error {
+	def, err := k.GetDefinition(ctx, denom)
+	if err != nil {
+		return sdkerrors.Wrapf(err, "not able to get token info for denom:%s", denom)
+	}
+
+	if !def.IsAdmin(sender) {
+		return sdkerrors.Wrap(cosmoserrors.ErrUnauthorized, "only admin can transfer administration of an account")
+	}
+
+	previousAdmin := def.Admin
+
+	subunit, issuer, err := types.DeconstructDenom(denom)
+	if err != nil {
+		return err
+	}
+
+	def.Admin = addr.String()
+	k.SetDefinition(ctx, issuer, subunit, def)
+
+	if err := ctx.EventManager().EmitTypedEvent(&types.EventAdminTransferred{
+		Denom:         denom,
+		PreviousAdmin: previousAdmin,
+		CurrentAdmin:  def.Admin,
+	}); err != nil {
+		return sdkerrors.Wrapf(types.ErrInvalidState, "failed to emit EventAdminTransferred event: %s", err)
+	}
+
+	return nil
+}
+
+// ClearAdmin removes admin of a fungible token.
+func (k Keeper) ClearAdmin(ctx sdk.Context, sender sdk.AccAddress, denom string) error {
+	def, err := k.GetDefinition(ctx, denom)
+	if err != nil {
+		return sdkerrors.Wrapf(err, "not able to get token info for denom:%s", denom)
+	}
+
+	if !def.IsAdmin(sender) {
+		return sdkerrors.Wrap(cosmoserrors.ErrUnauthorized, "only admin can remove administration of an account")
+	}
+
+	previousAdmin := def.Admin
+
+	subunit, issuer, err := types.DeconstructDenom(denom)
+	if err != nil {
+		return err
+	}
+
+	// if extension feature is disabled, after clearing admin, there is no one to send commission to, so the commission
+	// rate sets to zero else only the admin is cleared and the extension receives the commission rate
+	def.Admin = ""
+	if !def.IsFeatureEnabled(types.Feature_extension) {
+		def.SendCommissionRate = sdkmath.LegacyZeroDec()
+	}
+
+	k.SetDefinition(ctx, issuer, subunit, def)
+
+	if err := ctx.EventManager().EmitTypedEvent(&types.EventAdminCleared{
+		Denom:         denom,
+		PreviousAdmin: previousAdmin,
+	}); err != nil {
+		return sdkerrors.Wrapf(types.ErrInvalidState, "failed to emit EventAdminCleared event: %s", err)
+	}
+
+	return nil
+}
+
+// UpdateDEXSettings updates the DEX settings of a specified denom.
+func (k Keeper) UpdateDEXSettings(
+	ctx sdk.Context,
+	sender sdk.AccAddress,
+	denom string,
+	settings types.DEXSettings,
+) error {
+	if err := types.ValidateDEXSettings(settings); err != nil {
+		return err
+	}
+
+	if k.authority != sender.String() {
+		def, err := k.GetDefinition(ctx, denom)
+		if err != nil {
+			return sdkerrors.Wrapf(err, "not able to get token info for denom:%s", denom)
+		}
+		if !def.IsAdmin(sender) {
+			return sdkerrors.Wrap(cosmoserrors.ErrUnauthorized, "only admin and gov can update DEX settings")
+		}
+	}
+
+	prevSettings, err := k.getDEXSettingsOrNil(ctx, denom)
+	if err != nil {
+		return err
+	}
+	k.SetDEXSettings(ctx, denom, settings)
+
+	if err := ctx.EventManager().EmitTypedEvent(&types.EventDEXSettingsChanged{
+		PreviousSettings: prevSettings,
+		NewSettings:      settings,
+	}); err != nil {
+		return sdkerrors.Wrapf(types.ErrInvalidState, "failed to emit EventDEXSettingsChanged event: %s", err)
+	}
+
+	return nil
+}
+
+// SetDEXSettings sets the DEX settings of a specified denom.
+func (k Keeper) SetDEXSettings(ctx sdk.Context, denom string, settings types.DEXSettings) {
+	ctx.KVStore(k.storeKey).Set(types.CreateDEXSettingsKey(denom), k.cdc.MustMarshal(&settings))
+}
+
+// GetDEXSettings gets the DEX settings of a specified denom.
+func (k Keeper) GetDEXSettings(ctx sdk.Context, denom string) (types.DEXSettings, error) {
+	bz := ctx.KVStore(k.storeKey).Get(types.CreateDEXSettingsKey(denom))
+	if bz == nil {
+		return types.DEXSettings{}, sdkerrors.Wrapf(types.ErrDEXSettingsNotFound, "denom: %s", denom)
+	}
+	var settings types.DEXSettings
+	k.cdc.MustUnmarshal(bz, &settings)
+
+	return settings, nil
+}
+
+// GetDEXSettingsWithDenoms returns all DEX settings with the corresponding denoms.
+func (k Keeper) GetDEXSettingsWithDenoms(
+	ctx sdk.Context,
+	pagination *query.PageRequest,
+) ([]types.DEXSettingsWithDenom, *query.PageResponse, error) {
+	dexSettings := make([]types.DEXSettingsWithDenom, 0)
+	store := prefix.NewStore(ctx.KVStore(k.storeKey), types.DEXSettingsKeyPrefix)
+	pageRes, err := query.Paginate(store, pagination, func(key, value []byte) error {
+		denom, err := types.DecodeDenomFromKey(key)
+		if err != nil {
+			return err
+		}
+		var settings types.DEXSettings
+		k.cdc.MustUnmarshal(value, &settings)
+
+		dexSettings = append(dexSettings, types.DEXSettingsWithDenom{
+			Denom:       denom,
+			DEXSettings: settings,
+		})
+
+		return nil
+	})
+
+	return dexSettings, pageRes, err
+}
+
 func (k Keeper) mintIfReceivable(
 	ctx sdk.Context,
 	def types.Definition,
@@ -608,7 +992,7 @@ func (k Keeper) mintIfReceivable(
 		ctx = cwasmtypes.WithSmartContractRecipient(ctx, recipient.String())
 	}
 
-	if err := k.isCoinReceivable(ctx, recipient, def, amount); err != nil {
+	if err := k.validateCoinReceivable(ctx, recipient, def, amount); err != nil {
 		return sdkerrors.Wrapf(err, "coins are not receivable")
 	}
 
@@ -635,7 +1019,7 @@ func (k Keeper) burnIfSpendable(
 	def types.Definition,
 	amount sdkmath.Int,
 ) error {
-	if err := k.isCoinSpendable(ctx, account, def, amount); err != nil {
+	if err := k.validateCoinSpendable(ctx, account, def, amount); err != nil {
 		return sdkerrors.Wrapf(err, "coins are not spendable")
 	}
 
@@ -654,15 +1038,20 @@ func (k Keeper) burn(ctx sdk.Context, account sdk.AccAddress, coinsToBurn sdk.Co
 	return nil
 }
 
-func (k Keeper) isCoinSpendable(ctx sdk.Context, addr sdk.AccAddress, def types.Definition, amount sdkmath.Int) error {
+func (k Keeper) validateCoinSpendable(
+	ctx sdk.Context,
+	addr sdk.AccAddress,
+	def types.Definition,
+	amount sdkmath.Int,
+) error {
 	// This check is effective when IBC transfer is acknowledged by the peer chain. It happens in two situations:
 	// - when transfer succeeded
 	// - when transfer has been rejected by the other chain.
-	// `isCoinSpendable` is called only in the second case, that's why we don't need to differentiate them here.
+	// `validateCoinSpendable` is called only in the second case, that's why we don't need to differentiate them here.
 	// So, whenever it happens here, it means transfer has been rejected. It means that funds are going to be refunded
 	// back to the sender by the IBC transfer module.
 	// It should succeed even if the issuer decided, for whatever reason, to freeze the escrow address.
-	// It is done before cehcking for global freeze because refunding should not be blocked by this.
+	// It is done before checking for global freeze because refunding should not be blocked by this.
 	// Otherwise, funds would be lost forever, being blocked on the escrow account.
 	if wibctransfertypes.IsPurposeAck(ctx) {
 		return nil
@@ -673,7 +1062,9 @@ func (k Keeper) isCoinSpendable(ctx sdk.Context, addr sdk.AccAddress, def types.
 		return nil
 	}
 
-	if def.IsFeatureEnabled(types.Feature_freezing) && k.isGloballyFrozen(ctx, def.Denom) && !def.IsIssuer(addr) {
+	if def.IsFeatureEnabled(types.Feature_freezing) &&
+		k.isGloballyFrozen(ctx, def.Denom) &&
+		!def.HasAdminPrivileges(addr) {
 		return sdkerrors.Wrapf(types.ErrGloballyFrozen, "%s is globally frozen", def.Denom)
 	}
 
@@ -686,7 +1077,7 @@ func (k Keeper) isCoinSpendable(ctx sdk.Context, addr sdk.AccAddress, def types.
 	}
 
 	if def.IsFeatureEnabled(types.Feature_block_smart_contracts) &&
-		!def.IsIssuer(addr) &&
+		!def.HasAdminPrivileges(addr) &&
 		cwasmtypes.IsTriggeredBySmartContract(ctx) {
 		return sdkerrors.Wrapf(
 			cosmoserrors.ErrUnauthorized,
@@ -695,17 +1086,29 @@ func (k Keeper) isCoinSpendable(ctx sdk.Context, addr sdk.AccAddress, def types.
 		)
 	}
 
-	if def.IsFeatureEnabled(types.Feature_freezing) && !def.IsIssuer(addr) {
-		availableBalance := k.availableBalance(ctx, addr, def.Denom)
-		if !availableBalance.Amount.GTE(amount) {
-			return sdkerrors.Wrapf(cosmoserrors.ErrInsufficientFunds, "%s is not available, available %s",
-				sdk.NewCoin(def.Denom, amount), availableBalance)
+	balance := k.bankKeeper.GetBalance(ctx, addr, def.Denom)
+	if err := k.validateCoinIsNotLockedByDEXAndBank(ctx, addr, balance, sdk.NewCoin(def.Denom, amount)); err != nil {
+		return err
+	}
+
+	if def.IsFeatureEnabled(types.Feature_freezing) && !def.HasAdminPrivileges(addr) {
+		frozenAmt := k.GetFrozenBalance(ctx, addr, def.Denom).Amount
+		notFrozenAmt := balance.Amount.Sub(frozenAmt)
+		if notFrozenAmt.LT(amount) {
+			return sdkerrors.Wrapf(cosmoserrors.ErrInsufficientFunds, "%s%s is not available, available %s%s",
+				amount.String(), def.Denom, notFrozenAmt.String(), def.Denom)
 		}
 	}
+
 	return nil
 }
 
-func (k Keeper) isCoinReceivable(ctx sdk.Context, addr sdk.AccAddress, def types.Definition, amount sdkmath.Int) error {
+func (k Keeper) validateCoinReceivable(
+	ctx sdk.Context,
+	addr sdk.AccAddress,
+	def types.Definition,
+	amount sdkmath.Int,
+) error {
 	// This check is effective when funds for IBC transfers are received by the escrow address.
 	// If IBC is enabled we always accept escrow address as a receiver of the funds because it must work
 	// despite the fact that address is not whitelisted.
@@ -722,7 +1125,7 @@ func (k Keeper) isCoinReceivable(ctx sdk.Context, addr sdk.AccAddress, def types
 	// This check is effective when IBC transfer is acknowledged by the peer chain. It happens in two situations:
 	// - when transfer succeeded
 	// - when transfer has been rejected by the other chain.
-	// `isCoinReceivable` is called only in the second case, that's why we don't need to differentiate them here.
+	// `validateCoinReceivable` is called only in the second case, that's why we don't need to differentiate them here.
 	// So, whenever it happens here, it means transfer has been rejected. It means that funds are going to be refunded
 	// back to the sender by the IBC transfer module.
 	// That means we should allow to do this even if the sender is no longer whitelisted. It might happen that between
@@ -738,7 +1141,7 @@ func (k Keeper) isCoinReceivable(ctx sdk.Context, addr sdk.AccAddress, def types
 		return nil
 	}
 
-	if def.IsFeatureEnabled(types.Feature_whitelisting) && !def.IsIssuer(addr) {
+	if def.IsFeatureEnabled(types.Feature_whitelisting) && !def.HasAdminPrivileges(addr) {
 		balance := k.bankKeeper.GetBalance(ctx, addr, def.Denom)
 		whitelistedBalance := k.GetWhitelistedBalance(ctx, addr, def.Denom)
 
@@ -752,7 +1155,7 @@ func (k Keeper) isCoinReceivable(ctx sdk.Context, addr sdk.AccAddress, def types
 	}
 
 	if def.IsFeatureEnabled(types.Feature_block_smart_contracts) &&
-		!def.IsIssuer(addr) &&
+		!def.HasAdminPrivileges(addr) &&
 		cwasmtypes.IsReceivingSmartContract(ctx, addr.String()) {
 		return sdkerrors.Wrapf(cosmoserrors.ErrUnauthorized, "transfers to smart contracts are disabled for %s", def.Denom)
 	}
@@ -764,19 +1167,6 @@ func (k Keeper) isSymbolDuplicated(ctx sdk.Context, symbol string, issuer sdk.Ac
 	compositeKey := types.CreateSymbolKey(issuer, symbol)
 	rawBytes := ctx.KVStore(k.storeKey).Get(compositeKey)
 	return rawBytes != nil
-}
-
-func (k Keeper) availableBalance(ctx sdk.Context, addr sdk.AccAddress, denom string) sdk.Coin {
-	balance := k.bankKeeper.GetBalance(ctx, addr, denom)
-	if balance.IsZero() {
-		return balance
-	}
-
-	frozenBalance := k.GetFrozenBalance(ctx, addr, denom)
-	if frozenBalance.IsGTE(balance) {
-		return sdk.NewCoin(denom, sdkmath.ZeroInt())
-	}
-	return balance.Sub(frozenBalance)
 }
 
 func (k Keeper) getDefinitions(
@@ -810,7 +1200,7 @@ func (k Keeper) getTokenFullInfo(ctx sdk.Context, definition types.Definition) (
 
 	precision := -1
 	for _, unit := range metadata.DenomUnits {
-		if unit.Denom == metadata.Symbol {
+		if unit.Denom == metadata.Display {
 			precision = int(unit.Exponent)
 			break
 		}
@@ -818,6 +1208,11 @@ func (k Keeper) getTokenFullInfo(ctx sdk.Context, definition types.Definition) (
 
 	if precision < 0 {
 		return types.Token{}, sdkerrors.Wrap(types.ErrInvalidInput, "precision not found")
+	}
+
+	dexSettings, err := k.getDEXSettingsOrNil(ctx, definition.Denom)
+	if err != nil {
+		return types.Token{}, err
 	}
 
 	return types.Token{
@@ -834,6 +1229,9 @@ func (k Keeper) getTokenFullInfo(ctx sdk.Context, definition types.Definition) (
 		Version:            definition.Version,
 		URI:                definition.URI,
 		URIHash:            definition.URIHash,
+		Admin:              definition.Admin,
+		ExtensionCWAddress: definition.ExtensionCWAddress,
+		DEXSettings:        dexSettings,
 	}, nil
 }
 
@@ -900,8 +1298,8 @@ func (k Keeper) freezingChecks(ctx sdk.Context, sender, addr sdk.AccAddress, coi
 		return sdkerrors.Wrapf(err, "not able to get token info for denom:%s", coin.Denom)
 	}
 
-	if def.IsIssuer(addr) {
-		return sdkerrors.Wrap(cosmoserrors.ErrUnauthorized, "issuer's balance can't be frozen")
+	if def.HasAdminPrivileges(addr) {
+		return sdkerrors.Wrap(cosmoserrors.ErrUnauthorized, "admin's balance can't be frozen")
 	}
 
 	return def.CheckFeatureAllowed(sender, types.Feature_freezing)
@@ -911,9 +1309,116 @@ func (k Keeper) isGloballyFrozen(ctx sdk.Context, denom string) bool {
 	return bytes.Equal(ctx.KVStore(k.storeKey).Get(types.CreateGlobalFreezeKey(denom)), types.StoreTrue)
 }
 
+func (k Keeper) validateClawbackAllowed(ctx sdk.Context, sender, addr sdk.AccAddress, coin sdk.Coin) error {
+	def, err := k.GetDefinition(ctx, coin.Denom)
+	if err != nil {
+		return sdkerrors.Wrapf(err, "not able to get token info for denom:%s", coin.Denom)
+	}
+
+	if _, isModuleAccount := k.accountKeeper.GetAccount(ctx, addr).(*authtypes.ModuleAccount); isModuleAccount {
+		return sdkerrors.Wrap(cosmoserrors.ErrUnauthorized, "claw back from module accounts is prohibited")
+	}
+
+	balance := k.bankKeeper.GetBalance(ctx, addr, coin.Denom)
+	if err := k.validateCoinIsNotLockedByDEXAndBank(ctx, addr, balance, coin); err != nil {
+		return err
+	}
+
+	return def.CheckFeatureAllowed(sender, types.Feature_clawback)
+}
+
 // whitelistedAccountBalanceStore gets the store for the whitelisted balances of an account.
 func (k Keeper) whitelistedAccountBalanceStore(ctx sdk.Context, addr sdk.AccAddress) balanceStore {
 	return newBalanceStore(k.cdc, ctx.KVStore(k.storeKey), types.CreateWhitelistedBalancesKey(addr))
+}
+
+// dexLockedBalancesStore get the store for the DEX locked balances of all accounts.
+func (k Keeper) dexLockedBalancesStore(ctx sdk.Context) prefix.Store {
+	return prefix.NewStore(ctx.KVStore(k.storeKey), types.DEXLockedBalancesKeyPrefix)
+}
+
+// dexLockedAccountBalanceStore gets the store for the DEX locked balances of an account.
+func (k Keeper) dexLockedAccountBalanceStore(ctx sdk.Context, addr sdk.AccAddress) balanceStore {
+	return newBalanceStore(k.cdc, ctx.KVStore(k.storeKey), types.CreateDEXLockedBalancesKey(addr))
+}
+
+func (k Keeper) dexLockingChecks(ctx sdk.Context, addr sdk.AccAddress, coin sdk.Coin) error {
+	def, err := k.GetDefinition(ctx, coin.Denom)
+	if err != nil {
+		// check if the token is assetft
+		if !sdkerrors.IsOf(err, types.ErrInvalidDenom, types.ErrTokenNotFound) {
+			return err
+		}
+	} else {
+		if def.ExtensionCWAddress != "" {
+			return sdkerrors.Wrapf(
+				types.ErrInvalidInput,
+				"failed to DEX lock %s, not supported for the tokens with extensions",
+				coin.String(),
+			)
+		}
+		if def.IsFeatureEnabled(types.Feature_block_dex) {
+			return sdkerrors.Wrapf(
+				cosmoserrors.ErrUnauthorized,
+				"locking coins for DEX disabled for %s",
+				def.Denom,
+			)
+		}
+	}
+
+	balance := k.bankKeeper.GetBalance(ctx, addr, coin.Denom)
+	if err := k.validateCoinIsNotLockedByDEXAndBank(ctx, addr, balance, coin); err != nil {
+		return err
+	}
+
+	frozenAmt := k.GetFrozenBalance(ctx, addr, coin.Denom).Amount
+	notFrozenTotalAmt := balance.Amount.Sub(frozenAmt)
+	if notFrozenTotalAmt.LT(coin.Amount) {
+		return sdkerrors.Wrapf(
+			cosmoserrors.ErrInsufficientFunds,
+			"failed to DEX lock %s available %s%s",
+			coin.String(),
+			notFrozenTotalAmt,
+			coin.Denom,
+		)
+	}
+
+	return nil
+}
+
+func (k Keeper) validateCoinIsNotLockedByDEXAndBank(
+	ctx sdk.Context,
+	addr sdk.AccAddress,
+	balance, coin sdk.Coin,
+) error {
+	dexLockedAmt := k.GetDEXLockedBalance(ctx, addr, coin.Denom).Amount
+	availableAmt := balance.Amount.Sub(dexLockedAmt)
+	if availableAmt.LT(coin.Amount) {
+		return sdkerrors.Wrapf(cosmoserrors.ErrInsufficientFunds, "%s is not available, available %s%s",
+			coin.String(), availableAmt.String(), coin.Denom)
+	}
+
+	bankLockedAmt := k.bankKeeper.LockedCoins(ctx, addr).AmountOf(coin.Denom)
+	// validate that we don't use the coins locked by bank
+	availableAmt = availableAmt.Sub(bankLockedAmt)
+	if availableAmt.LT(coin.Amount) {
+		return sdkerrors.Wrapf(cosmoserrors.ErrInsufficientFunds, "%s is not available, available %s%s",
+			coin.String(), availableAmt.String(), coin.Denom)
+	}
+
+	return nil
+}
+
+func (k Keeper) getDEXSettingsOrNil(ctx sdk.Context, denom string) (*types.DEXSettings, error) {
+	dexSettings, err := k.GetDEXSettings(ctx, denom)
+	if err != nil {
+		if errors.Is(err, types.ErrDEXSettingsNotFound) {
+			return nil, nil //nolint:nilnil //returns nil if data not found
+		}
+		return nil, err
+	}
+
+	return &dexSettings, nil
 }
 
 // logger returns the Keeper logger.

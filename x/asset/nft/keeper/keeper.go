@@ -4,14 +4,15 @@ import (
 	"bytes"
 
 	sdkerrors "cosmossdk.io/errors"
+	"cosmossdk.io/store/prefix"
+	storetypes "cosmossdk.io/store/types"
+	"cosmossdk.io/x/nft"
 	"github.com/cosmos/cosmos-sdk/codec"
-	"github.com/cosmos/cosmos-sdk/store/prefix"
-	storetypes "github.com/cosmos/cosmos-sdk/store/types"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"github.com/cosmos/cosmos-sdk/types/query"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
-	"github.com/cosmos/cosmos-sdk/x/nft"
 	"github.com/cosmos/gogoproto/proto"
 	"github.com/pkg/errors"
 
@@ -136,7 +137,7 @@ func (k Keeper) IssueClass(ctx sdk.Context, settings types.IssueClassSettings) (
 	}
 
 	id := types.BuildClassID(settings.Symbol, settings.Issuer)
-	if err := types.ValidateData(settings.Data); err != nil {
+	if err := types.ValidateClassData(settings.Data); err != nil {
 		return "", sdkerrors.Wrap(types.ErrInvalidInput, err.Error())
 	}
 
@@ -285,7 +286,7 @@ func (k Keeper) Mint(ctx sdk.Context, settings types.MintSettings) error {
 		return sdkerrors.Wrap(types.ErrInvalidInput, err.Error())
 	}
 
-	if err := types.ValidateData(settings.Data); err != nil {
+	if err := types.ValidateNFTData(settings.Data); err != nil {
 		return sdkerrors.Wrap(types.ErrInvalidInput, err.Error())
 	}
 
@@ -361,6 +362,77 @@ func (k Keeper) Mint(ctx sdk.Context, settings types.MintSettings) error {
 	}
 
 	return nil
+}
+
+// UpdateData updates non-fungible token data.
+func (k Keeper) UpdateData(
+	ctx sdk.Context,
+	sender sdk.AccAddress,
+	classID, id string,
+	itemsToUpdate []types.DataDynamicIndexedItem,
+) error {
+	if err := k.validateNFTNotFrozen(ctx, classID, id); err != nil {
+		return err
+	}
+
+	storedNFT, found := k.nftKeeper.GetNFT(ctx, classID, id)
+	if !found {
+		return sdkerrors.Wrapf(types.ErrNFTNotFound, "nft with classID:%s and ID:%s not found", classID, id)
+	}
+	if storedNFT.Data == nil {
+		return sdkerrors.Wrapf(types.ErrInvalidInput, "no data to update classID:%s, ID:%s", classID, id)
+	}
+	if storedNFT.Data.TypeUrl != "/"+proto.MessageName((*types.DataDynamic)(nil)) {
+		return sdkerrors.Wrapf(types.ErrInvalidInput, "nft data type %s is not updatable", storedNFT.Data.TypeUrl)
+	}
+	var dataDynamic types.DataDynamic
+	if err := dataDynamic.Unmarshal(storedNFT.Data.Value); err != nil {
+		return sdkerrors.Wrap(types.ErrInvalidInput, "failed to unmarshal DataDynamic data")
+	}
+
+	owner := k.nftKeeper.GetOwner(ctx, classID, id)
+	classDefinition, err := k.GetClassDefinition(ctx, classID)
+	if err != nil {
+		return err
+	}
+
+	// update dynamic items
+	for _, itemToUpdate := range itemsToUpdate {
+		if int(itemToUpdate.Index) > len(dataDynamic.Items)-1 {
+			return sdkerrors.Wrapf(
+				types.ErrInvalidInput, "invalid item, index %d out or range", itemToUpdate.Index,
+			)
+		}
+		storedItem := dataDynamic.Items[int(itemToUpdate.Index)]
+		if len(storedItem.Editors) == 0 {
+			return sdkerrors.Wrapf(types.ErrInvalidInput, "the item with index %d is not updatable", itemToUpdate.Index)
+		}
+		updateAllowed, err := isDataDynamicItemUpdateAllowed(sender, owner, classDefinition, storedItem)
+		if err != nil {
+			return err
+		}
+		if !updateAllowed {
+			return sdkerrors.Wrapf(
+				cosmoserrors.ErrUnauthorized,
+				"sender is not authorized to update the item with index %d",
+				itemToUpdate.Index,
+			)
+		}
+
+		dataDynamic.Items[int(itemToUpdate.Index)].Data = itemToUpdate.Data
+	}
+	data, err := codectypes.NewAnyWithValue(&dataDynamic)
+	if err != nil {
+		return sdkerrors.Wrap(types.ErrInvalidState, "failed to pack to Any type")
+	}
+	storedNFT.Data = data
+
+	// validate that final data after update is still valid
+	if err := types.ValidateNFTData(storedNFT.Data); err != nil {
+		return err
+	}
+
+	return k.nftKeeper.Update(ctx, storedNFT)
 }
 
 // Burn burns non-fungible token.
@@ -487,7 +559,8 @@ func (k Keeper) SetBurnt(ctx sdk.Context, classID, nftID string) error {
 func (k Keeper) GetBurntNFTs(
 	ctx sdk.Context, q *query.PageRequest,
 ) ([]types.BurntNFT, *query.PageResponse, error) {
-	mp := make(map[string][]string, 0)
+	burnt := make([]types.BurntNFT, 0)
+	classIDToBurntNFTIdx := make(map[string]int)
 	pageRes, err := query.Paginate(prefix.NewStore(ctx.KVStore(k.storeKey), types.NFTBurningKeyPrefix),
 		q, func(key, value []byte) error {
 			if !bytes.Equal(value, types.StoreTrue) {
@@ -503,19 +576,21 @@ func (k Keeper) GetBurntNFTs(
 				return err
 			}
 
-			mp[classID] = append(mp[classID], nftID)
+			idx, ok := classIDToBurntNFTIdx[classID]
+			if ok {
+				burnt[idx].NftIDs = append(burnt[idx].NftIDs, nftID)
+				return nil
+			}
+
+			burnt = append(burnt, types.BurntNFT{
+				ClassID: classID,
+				NftIDs:  []string{nftID},
+			})
+			classIDToBurntNFTIdx[classID] = len(burnt) - 1
 			return nil
 		})
 	if err != nil {
 		return nil, nil, err
-	}
-
-	burnt := make([]types.BurntNFT, 0, len(mp))
-	for classID, nfts := range mp {
-		burnt = append(burnt, types.BurntNFT{
-			ClassID: classID,
-			NftIDs:  nfts,
-		})
 	}
 
 	return burnt, pageRes, nil
@@ -633,7 +708,8 @@ func (k Keeper) IsClassFrozen(ctx sdk.Context, classID string, account sdk.AccAd
 //
 //nolint:dupl
 func (k Keeper) GetFrozenNFTs(ctx sdk.Context, q *query.PageRequest) ([]types.FrozenNFT, *query.PageResponse, error) {
-	mp := make(map[string][]string, 0)
+	frozen := make([]types.FrozenNFT, 0)
+	classIDToFrozenNFTIdx := make(map[string]int)
 	pageRes, err := query.Paginate(prefix.NewStore(ctx.KVStore(k.storeKey), types.NFTFreezingKeyPrefix),
 		q, func(key, value []byte) error {
 			if !bytes.Equal(value, types.StoreTrue) {
@@ -649,19 +725,21 @@ func (k Keeper) GetFrozenNFTs(ctx sdk.Context, q *query.PageRequest) ([]types.Fr
 				return err
 			}
 
-			mp[classID] = append(mp[classID], nftID)
+			idx, ok := classIDToFrozenNFTIdx[classID]
+			if ok {
+				frozen[idx].NftIDs = append(frozen[idx].NftIDs, nftID)
+				return nil
+			}
+
+			frozen = append(frozen, types.FrozenNFT{
+				ClassID: classID,
+				NftIDs:  []string{nftID},
+			})
+			classIDToFrozenNFTIdx[classID] = len(frozen) - 1
 			return nil
 		})
 	if err != nil {
 		return nil, nil, err
-	}
-
-	frozen := make([]types.FrozenNFT, 0, len(mp))
-	for classID, nfts := range mp {
-		frozen = append(frozen, types.FrozenNFT{
-			ClassID: classID,
-			NftIDs:  nfts,
-		})
 	}
 
 	return frozen, pageRes, nil
@@ -673,7 +751,8 @@ func (k Keeper) GetFrozenNFTs(ctx sdk.Context, q *query.PageRequest) ([]types.Fr
 func (k Keeper) GetAllClassFrozenAccounts(
 	ctx sdk.Context, q *query.PageRequest,
 ) ([]types.ClassFrozenAccounts, *query.PageResponse, error) {
-	mp := make(map[string][]string, 0)
+	frozen := make([]types.ClassFrozenAccounts, 0)
+	classIDToFrozenIdx := make(map[string]int)
 	pageRes, err := query.Paginate(prefix.NewStore(ctx.KVStore(k.storeKey), types.NFTClassFreezingKeyPrefix),
 		q, func(key, value []byte) error {
 			if !bytes.Equal(value, types.StoreTrue) {
@@ -692,20 +771,21 @@ func (k Keeper) GetAllClassFrozenAccounts(
 				return nil
 			}
 
-			accountString := account.String()
-			mp[classID] = append(mp[classID], accountString)
+			idx, ok := classIDToFrozenIdx[classID]
+			if ok {
+				frozen[idx].Accounts = append(frozen[idx].Accounts, account.String())
+				return nil
+			}
+
+			frozen = append(frozen, types.ClassFrozenAccounts{
+				ClassID:  classID,
+				Accounts: []string{account.String()},
+			})
+			classIDToFrozenIdx[classID] = len(frozen) - 1
 			return nil
 		})
 	if err != nil {
 		return nil, nil, err
-	}
-
-	frozen := make([]types.ClassFrozenAccounts, 0, len(mp))
-	for classID, accounts := range mp {
-		frozen = append(frozen, types.ClassFrozenAccounts{
-			ClassID:  classID,
-			Accounts: accounts,
-		})
 	}
 
 	return frozen, pageRes, nil
@@ -763,6 +843,30 @@ func (k Keeper) IsWhitelisted(ctx sdk.Context, classID, nftID string, account sd
 	}
 
 	return k.isClassWhitelisted(ctx, classID, account)
+}
+
+func isDataDynamicItemUpdateAllowed(
+	sender sdk.AccAddress,
+	owner sdk.AccAddress,
+	classDefinition types.ClassDefinition,
+	item types.DataDynamicItem,
+) (bool, error) {
+	for _, editor := range item.Editors {
+		switch editor {
+		case types.DataEditor_admin:
+			// TODO(v5) use admin instead of issuer once the admin is introduced
+			if classDefinition.IsIssuer(sender) {
+				return true, nil
+			}
+		case types.DataEditor_owner:
+			if owner.String() == sender.String() {
+				return true, nil
+			}
+		default:
+			return false, sdkerrors.Wrapf(types.ErrInvalidState, "unsupported editor %d", editor)
+		}
+	}
+	return false, nil
 }
 
 func (k Keeper) isClassWhitelisted(ctx sdk.Context, classID string, account sdk.AccAddress) (bool, error) {
@@ -844,7 +948,8 @@ func (k Keeper) GetWhitelistedAccounts(
 		classID string
 		nftID   string
 	}
-	mp := make(map[nftUniqueID][]string, 0)
+	whitelisted := make([]types.WhitelistedNFTAccounts, 0)
+	nftUniqueIDToWhitelistIdx := make(map[nftUniqueID]int)
 	pageRes, err := query.Paginate(prefix.NewStore(ctx.KVStore(k.storeKey), types.NFTWhitelistingKeyPrefix),
 		q, func(key, value []byte) error {
 			if !bytes.Equal(value, types.StoreTrue) {
@@ -868,21 +973,22 @@ func (k Keeper) GetWhitelistedAccounts(
 				nftID:   nftID,
 			}
 
-			accountString := account.String()
-			mp[uniqueID] = append(mp[uniqueID], accountString)
+			idx, ok := nftUniqueIDToWhitelistIdx[uniqueID]
+			if ok {
+				whitelisted[idx].Accounts = append(whitelisted[idx].Accounts, account.String())
+				return nil
+			}
+
+			whitelisted = append(whitelisted, types.WhitelistedNFTAccounts{
+				ClassID:  classID,
+				NftID:    nftID,
+				Accounts: []string{account.String()},
+			})
+			nftUniqueIDToWhitelistIdx[uniqueID] = len(whitelisted) - 1
 			return nil
 		})
 	if err != nil {
 		return nil, nil, err
-	}
-
-	whitelisted := make([]types.WhitelistedNFTAccounts, 0, len(mp))
-	for uniqueID, accounts := range mp {
-		whitelisted = append(whitelisted, types.WhitelistedNFTAccounts{
-			ClassID:  uniqueID.classID,
-			NftID:    uniqueID.nftID,
-			Accounts: accounts,
-		})
 	}
 
 	return whitelisted, pageRes, nil
@@ -894,7 +1000,8 @@ func (k Keeper) GetWhitelistedAccounts(
 func (k Keeper) GetAllClassWhitelistedAccounts(
 	ctx sdk.Context, q *query.PageRequest,
 ) ([]types.ClassWhitelistedAccounts, *query.PageResponse, error) {
-	mp := make(map[string][]string, 0)
+	whitelisted := make([]types.ClassWhitelistedAccounts, 0)
+	classIDToWhitelistedIdx := make(map[string]int)
 	pageRes, err := query.Paginate(prefix.NewStore(ctx.KVStore(k.storeKey), types.NFTClassWhitelistingKeyPrefix),
 		q, func(key, value []byte) error {
 			if !bytes.Equal(value, types.StoreTrue) {
@@ -913,20 +1020,21 @@ func (k Keeper) GetAllClassWhitelistedAccounts(
 				return nil
 			}
 
-			accountString := account.String()
-			mp[classID] = append(mp[classID], accountString)
+			idx, ok := classIDToWhitelistedIdx[classID]
+			if ok {
+				whitelisted[idx].Accounts = append(whitelisted[idx].Accounts, account.String())
+				return nil
+			}
+
+			whitelisted = append(whitelisted, types.ClassWhitelistedAccounts{
+				ClassID:  classID,
+				Accounts: []string{account.String()},
+			})
+			classIDToWhitelistedIdx[classID] = len(whitelisted) - 1
 			return nil
 		})
 	if err != nil {
 		return nil, nil, err
-	}
-
-	whitelisted := make([]types.ClassWhitelistedAccounts, 0, len(mp))
-	for classID, accounts := range mp {
-		whitelisted = append(whitelisted, types.ClassWhitelistedAccounts{
-			ClassID:  classID,
-			Accounts: accounts,
-		})
 	}
 
 	return whitelisted, pageRes, nil
@@ -1025,7 +1133,7 @@ func (k Keeper) SetClassWhitelisting(
 func (k Keeper) isNFTSendable(ctx sdk.Context, classID, nftID string) error {
 	classDefinition, err := k.GetClassDefinition(ctx, classID)
 	// we return nil here, since we want the original tests of the nft module to pass, but they
-	// fail if we return errors for unregistered NFTs on asset. Also the original nft module
+	// fail if we return errors for unregistered NFTs on asset. Also, the original nft module
 	// does not have access to the asset module to register the NFTs
 	if types.ErrClassNotFound.Is(err) {
 		return nil
@@ -1059,6 +1167,11 @@ func (k Keeper) isNFTSendable(ctx sdk.Context, classID, nftID string) error {
 		)
 	}
 
+	return k.validateNFTNotFrozen(ctx, classID, nftID)
+}
+
+func (k Keeper) validateNFTNotFrozen(ctx sdk.Context, classID, nftID string) error {
+	// the IsFrozen includes both class and NFT freezing check
 	isFrozen, err := k.IsFrozen(ctx, classID, nftID)
 	if err != nil {
 		if errors.Is(err, types.ErrFeatureDisabled) {
@@ -1070,19 +1183,10 @@ func (k Keeper) isNFTSendable(ctx sdk.Context, classID, nftID string) error {
 		return sdkerrors.Wrapf(cosmoserrors.ErrUnauthorized, "nft with classID:%s and ID:%s is frozen", classID, nftID)
 	}
 
-	isClassFrozen, err := k.IsClassFrozen(ctx, classID, owner)
-	if err != nil {
-		if errors.Is(err, types.ErrFeatureDisabled) {
-			return nil
-		}
-		return err
-	}
-	if isClassFrozen {
-		return sdkerrors.Wrapf(cosmoserrors.ErrUnauthorized, "nft with classID:%s and ID:%s is class frozen", classID, nftID)
-	}
 	return nil
 }
 
+// TODO: probably we should path naming `is` -> `validate` here and for all similar.
 func (k Keeper) isNFTReceivable(ctx sdk.Context, classID, nftID string, receiver sdk.AccAddress) error {
 	classDefinition, err := k.GetClassDefinition(ctx, classID)
 	// we return nil here, since we want the original tests of the nft module to pass, but they

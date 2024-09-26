@@ -17,6 +17,12 @@ var _ types.MsgServer = MsgServer{}
 type MsgKeeper interface {
 	IssueClass(ctx sdk.Context, settings types.IssueClassSettings) (string, error)
 	Mint(ctx sdk.Context, settings types.MintSettings) error
+	UpdateData(
+		ctx sdk.Context,
+		sender sdk.AccAddress,
+		classID, ID string,
+		itemsToUpdate []types.DataDynamicIndexedItem,
+	) error
 	Burn(ctx sdk.Context, owner sdk.AccAddress, classID, ID string) error
 	Freeze(ctx sdk.Context, sender sdk.AccAddress, classID, nftID string) error
 	Unfreeze(ctx sdk.Context, sender sdk.AccAddress, classID, nftID string) error
@@ -94,6 +100,26 @@ func (ms MsgServer) Mint(ctx context.Context, req *types.MsgMint) (*types.EmptyR
 			URIHash:   req.URIHash,
 			Data:      req.Data,
 		},
+	); err != nil {
+		return nil, err
+	}
+
+	return &types.EmptyResponse{}, nil
+}
+
+// UpdateData updates the dynamic data.
+func (ms MsgServer) UpdateData(ctx context.Context, req *types.MsgUpdateData) (*types.EmptyResponse, error) {
+	sender, err := sdk.AccAddressFromBech32(req.Sender)
+	if err != nil {
+		return nil, sdkerrors.Wrap(types.ErrInvalidInput, "invalid sender")
+	}
+
+	if err := ms.keeper.UpdateData(
+		sdk.UnwrapSDKContext(ctx),
+		sender,
+		req.ClassID,
+		req.ID,
+		req.Items,
 	); err != nil {
 		return nil, err
 	}

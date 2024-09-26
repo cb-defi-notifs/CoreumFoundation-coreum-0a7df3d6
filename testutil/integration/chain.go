@@ -5,23 +5,36 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/url"
+	"os"
+	"time"
 
+	"cosmossdk.io/log"
 	sdkmath "cosmossdk.io/math"
 	rpcclient "github.com/cometbft/cometbft/rpc/client"
+	dbm "github.com/cosmos/cosmos-db"
 	"github.com/cosmos/cosmos-sdk/client/flags"
-	"github.com/cosmos/cosmos-sdk/client/grpc/tmservice"
+	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
 	"github.com/cosmos/cosmos-sdk/codec"
 	"github.com/cosmos/cosmos-sdk/crypto/hd"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	sdkmultisig "github.com/cosmos/cosmos-sdk/crypto/keys/multisig"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	multisigtypes "github.com/cosmos/cosmos-sdk/crypto/types/multisig"
+	simtestutil "github.com/cosmos/cosmos-sdk/testutil/sims"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 	sdksigning "github.com/cosmos/cosmos-sdk/types/tx/signing"
+	"github.com/cosmos/cosmos-sdk/x/auth"
+	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
+	tx "github.com/cosmos/cosmos-sdk/x/auth/tx/config"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	"github.com/cosmos/cosmos-sdk/x/auth/vesting"
+	authz "github.com/cosmos/cosmos-sdk/x/authz/module"
+	group "github.com/cosmos/cosmos-sdk/x/group/module"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/cosmos/gogoproto/proto"
+	ibc "github.com/cosmos/ibc-go/v8/modules/core"
+	ibctm "github.com/cosmos/ibc-go/v8/modules/light-clients/07-tendermint"
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
@@ -34,13 +47,15 @@ import (
 	coreumkeyring "github.com/CoreumFoundation/coreum/v4/pkg/keyring"
 )
 
+// defaultGasAdjustment is gas adjustment used for the nondeterministic gas messages.
+const defaultGasAdjustment = 1.5
+
 // ChainSettings represent common settings for the chains.
 type ChainSettings struct {
 	ChainID       string
 	Denom         string
 	AddressPrefix string
-	GasPrice      sdk.Dec
-	GasAdjustment float64
+	GasPrice      sdkmath.LegacyDec
 	CoinType      uint32
 	RPCAddress    string
 }
@@ -122,11 +137,13 @@ func (c ChainContext) TxFactory() client.Factory {
 		WithChainID(c.ChainSettings.ChainID).
 		WithTxConfig(c.ClientContext.TxConfig()).
 		WithGasPrices(c.NewDecCoin(c.ChainSettings.GasPrice).String())
-	if c.ChainSettings.GasAdjustment != 0 {
-		txf = txf.WithGasAdjustment(c.ChainSettings.GasAdjustment)
-	}
 
 	return txf
+}
+
+// TxFactoryAuto returns tx factory with set auto estimation and gas adjustment.
+func (c ChainContext) TxFactoryAuto() client.Factory {
+	return c.TxFactory().WithSimulateAndExecute(true).WithGasAdjustment(defaultGasAdjustment)
 }
 
 // NewCoin helper function to initialize sdk.Coin by passing just amount.
@@ -135,7 +152,7 @@ func (c ChainContext) NewCoin(amount sdkmath.Int) sdk.Coin {
 }
 
 // NewDecCoin helper function to initialize sdk.DecCoin by passing just amount.
-func (c ChainContext) NewDecCoin(amount sdk.Dec) sdk.DecCoin {
+func (c ChainContext) NewDecCoin(amount sdkmath.LegacyDec) sdk.DecCoin {
 	return sdk.NewDecCoinFromDec(c.ChainSettings.Denom, amount)
 }
 
@@ -220,7 +237,7 @@ func (c ChainContext) SignAndBroadcastMultisigTx(
 	}
 
 	for _, signersKeyName := range signersKeyNames {
-		if err := client.Sign(txf, signersKeyName, txBuilder, false); err != nil {
+		if err := client.Sign(ctx, txf, signersKeyName, txBuilder, false); err != nil {
 			return nil, err
 		}
 	}
@@ -269,12 +286,17 @@ func NewChain(
 	chainSettings ChainSettings,
 	fundingMnemonic string,
 ) Chain {
-	encodingConfig := config.NewEncodingConfig(app.ModuleBasics)
+	tempApp := app.New(log.NewNopLogger(), dbm.NewMemDB(), nil, true, simtestutil.NewAppOptionsWithFlagHome(tempDir()))
+	encodingConfig := config.EncodingConfig{
+		InterfaceRegistry: tempApp.InterfaceRegistry(),
+		Codec:             tempApp.AppCodec(),
+		TxConfig:          tempApp.TxConfig(),
+		Amino:             tempApp.LegacyAmino(),
+	}
 
-	clientCtxConfig := client.DefaultContextConfig()
-	clientCtxConfig.GasConfig.GasPriceAdjustment = sdk.NewDec(1)
-	clientCtxConfig.GasConfig.GasAdjustment = 1
-	clientCtx := client.NewContext(clientCtxConfig, app.ModuleBasics).
+	clientCtx := client.NewContext(DefaultClientContextConfig(), auth.AppModuleBasic{}).
+		WithInterfaceRegistry(encodingConfig.InterfaceRegistry).
+		WithTxConfig(encodingConfig.TxConfig).
 		WithChainID(chainSettings.ChainID).
 		WithKeyring(coreumkeyring.NewConcurrentSafeKeyring(keyring.NewInMemory(encodingConfig.Codec))).
 		WithBroadcastMode(flags.BroadcastSync).
@@ -282,6 +304,22 @@ func NewChain(
 		WithClient(rpcClient).
 		WithAwaitTx(true)
 
+	enabledSignModes := make([]sdksigning.SignMode, 0)
+	enabledSignModes = append(enabledSignModes, authtx.DefaultSignModes...)
+	enabledSignModes = append(enabledSignModes, sdksigning.SignMode_SIGN_MODE_TEXTUAL)
+	txConfigOpts := authtx.ConfigOptions{
+		EnabledSignModes:           enabledSignModes,
+		TextualCoinMetadataQueryFn: tx.NewGRPCCoinMetadataQueryFn(clientCtx),
+	}
+	txConfig, err := authtx.NewTxConfigWithOptions(
+		encodingConfig.Codec,
+		txConfigOpts,
+	)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	clientCtx = clientCtx.WithTxConfig(txConfig)
 	chainCtx := NewChainContext(encodingConfig, clientCtx, chainSettings)
 
 	var faucet Faucet
@@ -297,12 +335,24 @@ func NewChain(
 	}
 }
 
+// DefaultClientContextConfig returns a default client context config for integration tests.
+func DefaultClientContextConfig() client.ContextConfig {
+	clientCtxConfig := client.DefaultContextConfig()
+	clientCtxConfig.GasConfig.GasPriceAdjustment = sdkmath.LegacyMustNewDecFromStr("1.3")
+	clientCtxConfig.GasConfig.GasAdjustment = 1
+
+	clientCtxConfig.TimeoutConfig.TxStatusPollInterval = 100 * time.Millisecond
+	clientCtxConfig.TimeoutConfig.TxNumberOfBlocksToWait = 3
+
+	return clientCtxConfig
+}
+
 // QueryChainSettings queries the chain setting using the provided GRPC client.
 func QueryChainSettings(ctx context.Context, grpcClient *grpc.ClientConn) ChainSettings {
-	clientCtx := client.NewContext(client.DefaultContextConfig(), app.ModuleBasics).
+	clientCtx := client.NewContext(client.DefaultContextConfig(), auth.AppModuleBasic{}).
 		WithGRPCClient(grpcClient)
 
-	infoBeforeRes, err := tmservice.NewServiceClient(clientCtx).GetNodeInfo(ctx, &tmservice.GetNodeInfoRequest{})
+	infoBeforeRes, err := cmtservice.NewServiceClient(clientCtx).GetNodeInfo(ctx, &cmtservice.GetNodeInfoRequest{})
 	if err != nil {
 		panic(fmt.Sprintf("failed to get node info, err: %s", err))
 	}
@@ -349,7 +399,15 @@ func QueryChainSettings(ctx context.Context, grpcClient *grpc.ClientConn) ChainS
 
 // DialGRPCClient creates the grpc connection for the given URL.
 func DialGRPCClient(grpcURL string) (*grpc.ClientConn, error) {
-	encodingConfig := config.NewEncodingConfig(app.ModuleBasics)
+	encodingConfig := config.NewEncodingConfig(
+		auth.AppModuleBasic{},
+		authz.AppModuleBasic{},
+		vesting.AppModuleBasic{},
+		group.AppModuleBasic{},
+		ibc.AppModuleBasic{},
+		ibctm.AppModuleBasic{},
+	)
+
 	pc, ok := encodingConfig.Codec.(codec.GRPCCodecProvider)
 	if !ok {
 		panic("failed to cast codec to codec.GRPCCodecProvider)")
@@ -364,7 +422,7 @@ func DialGRPCClient(grpcURL string) (*grpc.ClientConn, error) {
 
 	// https - tls grpc
 	if parsedURL.Scheme == "https" {
-		grpcClient, err := grpc.Dial(
+		grpcClient, err := grpc.NewClient(
 			host,
 			grpc.WithDefaultCallOptions(grpc.ForceCodec(pc.GRPCCodec())),
 			grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
@@ -380,7 +438,7 @@ func DialGRPCClient(grpcURL string) (*grpc.ClientConn, error) {
 		host = fmt.Sprintf("%s:%s", parsedURL.Scheme, parsedURL.Opaque)
 	}
 	// http - insecure
-	grpcClient, err := grpc.Dial(
+	grpcClient, err := grpc.NewClient(
 		host,
 		grpc.WithDefaultCallOptions(grpc.ForceCodec(pc.GRPCCodec())),
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -389,4 +447,14 @@ func DialGRPCClient(grpcURL string) (*grpc.ClientConn, error) {
 	}
 
 	return grpcClient, nil
+}
+
+func tempDir() string {
+	dir, err := os.MkdirTemp("", "integration-test")
+	if err != nil {
+		panic("failed to create temp dir: " + err.Error())
+	}
+	defer os.RemoveAll(dir) //nolint:errcheck // we don't care
+
+	return dir
 }

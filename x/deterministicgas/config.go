@@ -1,9 +1,13 @@
 package deterministicgas
 
 import (
+	storetypes "cosmossdk.io/store/types"
+	evidencetypes "cosmossdk.io/x/evidence/types"
+	feegranttypes "cosmossdk.io/x/feegrant"
+	nfttypes "cosmossdk.io/x/nft"
+	upgradetypes "cosmossdk.io/x/upgrade/types"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	"github.com/armon/go-metrics"
-	storetypes "github.com/cosmos/cosmos-sdk/store/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
@@ -12,34 +16,37 @@ import (
 	consensustypes "github.com/cosmos/cosmos-sdk/x/consensus/types"
 	crisistypes "github.com/cosmos/cosmos-sdk/x/crisis/types"
 	distributiontypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
-	evidencetypes "github.com/cosmos/cosmos-sdk/x/evidence/types"
-	feegranttypes "github.com/cosmos/cosmos-sdk/x/feegrant"
 	govtypesv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
 	govtypesv1beta1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1beta1"
 	"github.com/cosmos/cosmos-sdk/x/group"
 	minttypes "github.com/cosmos/cosmos-sdk/x/mint/types"
-	nfttypes "github.com/cosmos/cosmos-sdk/x/nft"
 	slashingtypes "github.com/cosmos/cosmos-sdk/x/slashing/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
-	upgradetypes "github.com/cosmos/cosmos-sdk/x/upgrade/types"
-	ibctransfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
-	ibcclienttypes "github.com/cosmos/ibc-go/v7/modules/core/02-client/types"
-	ibcconnectiontypes "github.com/cosmos/ibc-go/v7/modules/core/03-connection/types"
-	ibcchanneltypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
+	"github.com/cosmos/gogoproto/proto"
+	packetforwardtypes "github.com/cosmos/ibc-apps/middleware/packet-forward-middleware/v8/packetforward/types"
+	icacontrollertypes "github.com/cosmos/ibc-go/v8/modules/apps/27-interchain-accounts/controller/types"
+	icahosttypes "github.com/cosmos/ibc-go/v8/modules/apps/27-interchain-accounts/host/types"
+	ibctransfertypes "github.com/cosmos/ibc-go/v8/modules/apps/transfer/types"
+	ibcclienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
+	ibcconnectiontypes "github.com/cosmos/ibc-go/v8/modules/core/03-connection/types"
+	ibcchanneltypes "github.com/cosmos/ibc-go/v8/modules/core/04-channel/types"
 	"github.com/samber/lo"
 
 	assetfttypes "github.com/CoreumFoundation/coreum/v4/x/asset/ft/types"
 	assetnfttypes "github.com/CoreumFoundation/coreum/v4/x/asset/nft/types"
-	cnfttypes "github.com/CoreumFoundation/coreum/v4/x/nft"
+	customparamstypes "github.com/CoreumFoundation/coreum/v4/x/customparams/types"
+	dextypes "github.com/CoreumFoundation/coreum/v4/x/dex/types"
+	feemodeltypes "github.com/CoreumFoundation/coreum/v4/x/feemodel/types"
 )
 
 // These constants define gas for messages which have custom calculation logic.
 const (
 	BankSendPerCoinGas            = 50000
 	BankMultiSendPerOperationsGas = 35000
-	AuthzExecOverhead             = 1500
 	NFTIssueClassBaseGas          = 16_000
 	NFTMintBaseGas                = 39_000
+	NFTUpdateBaseGas              = 40_000
+	MsgGrantBaseGas               = 25000
 )
 
 type (
@@ -70,7 +77,7 @@ func DefaultConfig() Config {
 		FreeBytes:      2048,
 		FreeSignatures: 1,
 	}
-
+	storeConfig := storetypes.KVGasConfig()
 	cfg.gasByMsg = map[MsgURL]gasByMsgFunc{
 		// asset/ft
 		MsgToMsgURL(&assetfttypes.MsgIssue{}):               constantGasFunc(70_000),
@@ -81,14 +88,19 @@ func DefaultConfig() Config {
 		MsgToMsgURL(&assetfttypes.MsgSetFrozen{}):           constantGasFunc(8_500),
 		MsgToMsgURL(&assetfttypes.MsgGloballyFreeze{}):      constantGasFunc(5_000),
 		MsgToMsgURL(&assetfttypes.MsgGloballyUnfreeze{}):    constantGasFunc(5_000),
+		MsgToMsgURL(&assetfttypes.MsgClawback{}):            constantGasFunc(15_500),
 		MsgToMsgURL(&assetfttypes.MsgSetWhitelistedLimit{}): constantGasFunc(9_000),
-		// TODO(v4): Once we add a new token upgrade MsgUpgradeTokenV2 we should remove this one and re-estimate gas.
-		MsgToMsgURL(&assetfttypes.MsgUpgradeTokenV1{}): constantGasFunc(25_000),
+		MsgToMsgURL(&assetfttypes.MsgTransferAdmin{}):       constantGasFunc(10_000),
+		MsgToMsgURL(&assetfttypes.MsgClearAdmin{}):          constantGasFunc(8_500),
+		// TODO(v5): Once we add a new token upgrade MsgUpgradeTokenV2 we should remove this one and re-estimate gas.
+		MsgToMsgURL(&assetfttypes.MsgUpgradeTokenV1{}):    constantGasFunc(25_000),
+		MsgToMsgURL(&assetfttypes.MsgUpdateDEXSettings{}): constantGasFunc(10_000),
 
 		// asset/nft
 		MsgToMsgURL(&assetnfttypes.MsgBurn{}):                     constantGasFunc(26_000),
 		MsgToMsgURL(&assetnfttypes.MsgIssueClass{}):               dataGasFunc(NFTIssueClassBaseGas),
 		MsgToMsgURL(&assetnfttypes.MsgMint{}):                     dataGasFunc(NFTMintBaseGas),
+		MsgToMsgURL(&assetnfttypes.MsgUpdateData{}):               dataGasFunc(NFTUpdateBaseGas),
 		MsgToMsgURL(&assetnfttypes.MsgFreeze{}):                   constantGasFunc(8_000),
 		MsgToMsgURL(&assetnfttypes.MsgUnfreeze{}):                 constantGasFunc(5_000),
 		MsgToMsgURL(&assetnfttypes.MsgClassFreeze{}):              constantGasFunc(8_000),
@@ -98,9 +110,13 @@ func DefaultConfig() Config {
 		MsgToMsgURL(&assetnfttypes.MsgAddToClassWhitelist{}):      constantGasFunc(7_000),
 		MsgToMsgURL(&assetnfttypes.MsgRemoveFromClassWhitelist{}): constantGasFunc(3_500),
 
+		// dex
+		// TODO (dex): update with new values once we finish the DEX
+		MsgToMsgURL(&dextypes.MsgPlaceOrder{}):  constantGasFunc(120_000),
+		MsgToMsgURL(&dextypes.MsgCancelOrder{}): constantGasFunc(15_000),
+
 		// authz
-		MsgToMsgURL(&authz.MsgExec{}):   cfg.authzMsgExecGasFunc(AuthzExecOverhead),
-		MsgToMsgURL(&authz.MsgGrant{}):  constantGasFunc(28_000),
+		MsgToMsgURL(&authz.MsgGrant{}):  authzMsgGrantGasFunc(MsgGrantBaseGas, storeConfig.WriteCostPerByte),
 		MsgToMsgURL(&authz.MsgRevoke{}): constantGasFunc(8_000),
 
 		// bank
@@ -112,6 +128,7 @@ func DefaultConfig() Config {
 		MsgToMsgURL(&distributiontypes.MsgSetWithdrawAddress{}):          constantGasFunc(5_000),
 		MsgToMsgURL(&distributiontypes.MsgWithdrawDelegatorReward{}):     constantGasFunc(79_000),
 		MsgToMsgURL(&distributiontypes.MsgWithdrawValidatorCommission{}): constantGasFunc(22_000),
+		MsgToMsgURL(&distributiontypes.MsgDepositValidatorRewardsPool{}): constantGasFunc(39_000),
 
 		// feegrant
 		MsgToMsgURL(&feegranttypes.MsgGrantAllowance{}):  constantGasFunc(11_000),
@@ -122,9 +139,10 @@ func DefaultConfig() Config {
 		MsgToMsgURL(&govtypesv1beta1.MsgVoteWeighted{}): constantGasFunc(9_000),
 		MsgToMsgURL(&govtypesv1beta1.MsgDeposit{}):      constantGasFunc(85_000),
 
-		MsgToMsgURL(&govtypesv1.MsgVote{}):         constantGasFunc(6_000),
-		MsgToMsgURL(&govtypesv1.MsgVoteWeighted{}): constantGasFunc(6_500),
-		MsgToMsgURL(&govtypesv1.MsgDeposit{}):      constantGasFunc(65_000),
+		MsgToMsgURL(&govtypesv1.MsgVote{}):           constantGasFunc(6_000),
+		MsgToMsgURL(&govtypesv1.MsgVoteWeighted{}):   constantGasFunc(6_500),
+		MsgToMsgURL(&govtypesv1.MsgDeposit{}):        constantGasFunc(65_000),
+		MsgToMsgURL(&govtypesv1.MsgCancelProposal{}): constantGasFunc(66_000),
 
 		// group
 		MsgToMsgURL(&group.MsgCreateGroup{}):                     constantGasFunc(55_000),
@@ -144,11 +162,6 @@ func DefaultConfig() Config {
 
 		// nft
 		MsgToMsgURL(&nfttypes.MsgSend{}): constantGasFunc(25_000),
-
-		// cnft
-		// Deprecated: this will be removed in the next release alongside the cnft types.
-		//nolint:staticcheck //deprecated
-		MsgToMsgURL(&cnfttypes.MsgSend{}): constantGasFunc(25_000),
 
 		// slashing
 		// Unjail message is not used in any integration test because it's too much hassle. Instead, unjailing is estimated
@@ -178,16 +191,31 @@ func DefaultConfig() Config {
 		MsgToMsgURL(&wasmtypes.MsgUpdateAdmin{}): constantGasFunc(8_000),
 		MsgToMsgURL(&wasmtypes.MsgClearAdmin{}):  constantGasFunc(6_500),
 
-		// ibc transfer
+		// ibc/transfer
 		MsgToMsgURL(&ibctransfertypes.MsgTransfer{}): constantGasFunc(54_000),
+
+		// ibc/ica
+		MsgToMsgURL(&icacontrollertypes.MsgRegisterInterchainAccount{}): constantGasFunc(160_000),
 	}
 
 	//nolint:lll // we would like to keep the comments here inline
 	registerNondeterministicGasFuncs(
 		&cfg,
 		[]sdk.Msg{
+			// asset/ft
+			&assetfttypes.MsgUpdateParams{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
+
+			// asset/nft
+			&assetnfttypes.MsgUpdateParams{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
+
+			// feemodel
+			&feemodeltypes.MsgUpdateParams{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
+
 			// auth
 			&authtypes.MsgUpdateParams{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
+
+			// authz
+			&authz.MsgExec{}, // This is non-deterministic because the authorization object might be a listing object and quite big
 
 			// bank
 			&banktypes.MsgSetSendEnabled{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
@@ -199,6 +227,13 @@ func DefaultConfig() Config {
 			// crisis
 			&crisistypes.MsgUpdateParams{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
 
+			// feegrant
+			&feegranttypes.MsgPruneAllowances{},
+
+			// dex
+			&dextypes.MsgUpdateParams{},
+			&dextypes.MsgCancelOrdersByDenom{},
+
 			// distribution
 			&distributiontypes.MsgUpdateParams{},       // This is non-deterministic because all the gov proposals are non-deterministic anyway
 			&distributiontypes.MsgCommunityPoolSpend{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
@@ -209,6 +244,7 @@ func DefaultConfig() Config {
 			&govtypesv1beta1.MsgSubmitProposal{},
 
 			&govtypesv1.MsgSubmitProposal{},
+			&govtypesv1.MsgCancelProposal{},
 			&govtypesv1.MsgExecLegacyContent{},
 			&govtypesv1.MsgUpdateParams{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
 
@@ -239,6 +275,7 @@ func DefaultConfig() Config {
 
 			// staking
 			&stakingtypes.MsgUpdateParams{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
+			&customparamstypes.MsgUpdateStakingParams{},
 
 			// slashing
 			&slashingtypes.MsgUpdateParams{}, // This is non-deterministic because all the gov proposals are non-deterministic anyway
@@ -266,19 +303,25 @@ func DefaultConfig() Config {
 			&wasmtypes.MsgStoreAndInstantiateContract{},
 			&wasmtypes.MsgStoreAndMigrateContract{},
 			&wasmtypes.MsgUpdateContractLabel{},
+			&wasmtypes.MsgRemoveCodeUploadParamsAddresses{},
+			&wasmtypes.MsgAddCodeUploadParamsAddresses{},
 
 			// ibc/core/client
 			&ibcclienttypes.MsgCreateClient{},
 			&ibcclienttypes.MsgCreateClient{},
 			&ibcclienttypes.MsgUpdateClient{},
 			&ibcclienttypes.MsgUpgradeClient{},
-			&ibcclienttypes.MsgSubmitMisbehaviour{},
+			&ibcclienttypes.MsgSubmitMisbehaviour{}, //nolint // TODO remove legacy message
+			&ibcclienttypes.MsgUpdateParams{},
+			&ibcclienttypes.MsgIBCSoftwareUpgrade{},
+			&ibcclienttypes.MsgRecoverClient{},
 
 			// ibc/core/connection
 			&ibcconnectiontypes.MsgConnectionOpenInit{},
 			&ibcconnectiontypes.MsgConnectionOpenTry{},
 			&ibcconnectiontypes.MsgConnectionOpenAck{},
 			&ibcconnectiontypes.MsgConnectionOpenConfirm{},
+			&ibcconnectiontypes.MsgUpdateParams{},
 
 			// ibc/core/channel
 			&ibcchanneltypes.MsgChannelOpenInit{},
@@ -287,10 +330,29 @@ func DefaultConfig() Config {
 			&ibcchanneltypes.MsgChannelOpenConfirm{},
 			&ibcchanneltypes.MsgChannelCloseInit{},
 			&ibcchanneltypes.MsgChannelCloseConfirm{},
+			&ibcchanneltypes.MsgChannelUpgradeAck{},
+			&ibcchanneltypes.MsgChannelUpgradeCancel{},
+			&ibcchanneltypes.MsgChannelUpgradeConfirm{},
+			&ibcchanneltypes.MsgChannelUpgradeInit{},
+			&ibcchanneltypes.MsgChannelUpgradeOpen{},
+			&ibcchanneltypes.MsgChannelUpgradeTimeout{},
+			&ibcchanneltypes.MsgChannelUpgradeTry{},
+			&ibcchanneltypes.MsgPruneAcknowledgements{},
 			&ibcchanneltypes.MsgRecvPacket{},
 			&ibcchanneltypes.MsgTimeout{},
 			&ibcchanneltypes.MsgTimeoutOnClose{},
 			&ibcchanneltypes.MsgAcknowledgement{},
+			&ibcchanneltypes.MsgUpdateParams{},
+
+			// ibc/packetforward
+			&packetforwardtypes.MsgUpdateParams{},
+
+			// ibc/ica
+			&icacontrollertypes.MsgSendTx{},
+			&icahosttypes.MsgUpdateParams{},
+			&icahosttypes.MsgModuleQuerySafe{},
+			&icacontrollertypes.MsgUpdateParams{},
+			&ibctransfertypes.MsgUpdateParams{},
 		},
 	)
 
@@ -335,28 +397,22 @@ func MsgToMsgURL(msg sdk.Msg) MsgURL {
 	return MsgURL(sdk.MsgTypeURL(msg))
 }
 
-// NOTE: we need to pass Config by pointer here because
-// it needs to be initialized later map with all msg types inside to estimate gas recursively.
-func (cfg *Config) authzMsgExecGasFunc(authzMsgExecOverhead uint64) gasByMsgFunc {
+func authzMsgGrantGasFunc(baseGas, gasPerByte uint64) gasByMsgFunc {
 	return func(msg sdk.Msg) (uint64, bool) {
-		m, ok := msg.(*authz.MsgExec)
+		m, ok := msg.(*authz.MsgGrant)
 		if !ok {
 			return 0, false
 		}
 
-		totalGas := authzMsgExecOverhead
-		childMsgs, err := m.GetMessages()
-		if err != nil {
-			return 0, false
+		var overHead uint64
+		if m.Grant.Authorization != nil && lo.Contains([]string{
+			"/" + proto.MessageName(&assetnfttypes.SendAuthorization{}),
+			"/" + proto.MessageName(&assetfttypes.MintAuthorization{}),
+			"/" + proto.MessageName(&assetfttypes.BurnAuthorization{}),
+		}, m.Grant.Authorization.TypeUrl) {
+			overHead = uint64(len(m.Grant.Authorization.Value)) * gasPerByte
 		}
-		for _, childMsg := range childMsgs {
-			gas, isDeterministic := cfg.GasRequiredByMessage(childMsg)
-			if !isDeterministic {
-				return 0, false
-			}
-			totalGas += gas
-		}
-		return totalGas, true
+		return baseGas + overHead, true
 	}
 }
 
@@ -368,6 +424,10 @@ func dataGasFunc(constGas uint64) gasByMsgFunc {
 			dataLen = len(m.Data.GetValue())
 		case *assetnfttypes.MsgMint:
 			dataLen = len(m.Data.GetValue())
+		case *assetnfttypes.MsgUpdateData:
+			dataLen = lo.Reduce(m.Items, func(agg int, item assetnfttypes.DataDynamicIndexedItem, _ int) int {
+				return agg + len(item.Data)
+			}, 0)
 		default:
 			return 0, false
 		}

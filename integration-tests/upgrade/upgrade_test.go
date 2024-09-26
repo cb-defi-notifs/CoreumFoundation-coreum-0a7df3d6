@@ -4,24 +4,30 @@ package upgrade
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/cosmos/cosmos-sdk/client/grpc/tmservice"
+	upgradetypes "cosmossdk.io/x/upgrade/types"
+	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
 	govtypesv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
-	upgradetypes "github.com/cosmos/cosmos-sdk/x/upgrade/types"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/CoreumFoundation/coreum-tools/pkg/retry"
-	appupgradev4 "github.com/CoreumFoundation/coreum/v4/app/upgrade/v4"
+	appupgradev5 "github.com/CoreumFoundation/coreum/v4/app/upgrade/v5"
 	integrationtests "github.com/CoreumFoundation/coreum/v4/integration-tests"
 	"github.com/CoreumFoundation/coreum/v4/testutil/integration"
 )
+
+// Proper value for upgradeDelayInBlocks depends on block time and gov voting period.
+// upgradeDelayInBlocks*blockTime >= govVotingPeriod
+// Current value for govVotingPeriod is 20s and blockTime is customizable by flag and varies between 0.5s and 1s.
+const upgradeDelayInBlocks = 50
 
 type upgradeTest interface {
 	Before(t *testing.T)
@@ -33,35 +39,35 @@ func TestUpgrade(t *testing.T) {
 	ctx, chain := integrationtests.NewCoreumTestingContext(t)
 	requireT := require.New(t)
 
-	tmQueryClient := tmservice.NewServiceClient(chain.ClientContext)
-	infoRes, err := tmQueryClient.GetNodeInfo(ctx, &tmservice.GetNodeInfoRequest{})
+	tmQueryClient := cmtservice.NewServiceClient(chain.ClientContext)
+	infoRes, err := tmQueryClient.GetNodeInfo(ctx, &cmtservice.GetNodeInfoRequest{})
 	requireT.NoError(err)
 
-	switch infoRes.ApplicationVersion.Version {
-	case "v3.0.0", "v3.0.2":
-		upgradeV3ToV4(t)
-	default:
-		requireT.Failf("not supported version", "version: %s", infoRes.ApplicationVersion.Version)
+	if strings.HasPrefix(infoRes.ApplicationVersion.Version, "v4.") {
+		upgradeV4ToV5(t)
+		return
 	}
+	requireT.Failf("not supported cored version", "version: %s", infoRes.ApplicationVersion.Version)
 }
 
-func upgradeV3ToV4(t *testing.T) {
-	tests := []upgradeTest{}
+func upgradeV4ToV5(t *testing.T) {
+	tests := []upgradeTest{
+		&cosmosSDKVersion{},
+		&dex{},
+		&gov{},
+	}
 
 	for _, test := range tests {
 		test.Before(t)
 	}
 
-	runUpgrade(t, appupgradev4.Name, 30)
+	runUpgrade(t, appupgradev5.Name, upgradeDelayInBlocks)
 
 	for _, test := range tests {
 		test.After(t)
 	}
 }
 
-// Note that inside this method we use deprecated Block attributed of GetLatestBlockResponse (latestBlockRes.Block)
-// because we interact with older version of SDK before upgrade, and it doesn't have new SdkBlock attribute set.
-// We also use deprecated v1beta1 gov because v1 doesn't exist in cored v2.0.2.
 func runUpgrade(
 	t *testing.T,
 	upgradeName string,
@@ -77,18 +83,18 @@ func runUpgrade(
 	requireT.NoError(err)
 	requireT.Nil(currentPlan.Plan)
 
-	tmQueryClient := tmservice.NewServiceClient(chain.ClientContext)
-	infoBeforeRes, err := tmQueryClient.GetNodeInfo(ctx, &tmservice.GetNodeInfoRequest{})
+	tmQueryClient := cmtservice.NewServiceClient(chain.ClientContext)
+	infoBeforeRes, err := tmQueryClient.GetNodeInfo(ctx, &cmtservice.GetNodeInfoRequest{})
 	requireT.NoError(err)
 
-	latestBlockRes, err := tmQueryClient.GetLatestBlock(ctx, &tmservice.GetLatestBlockRequest{})
+	latestBlockRes, err := tmQueryClient.GetLatestBlock(ctx, &cmtservice.GetLatestBlockRequest{})
 	requireT.NoError(err)
 
-	upgradeHeight := latestBlockRes.Block.Header.Height + blocksToWait //nolint:staticcheck
+	upgradeHeight := latestBlockRes.SdkBlock.Header.Height + blocksToWait
 
 	// Create new proposer.
 	proposer := chain.GenAccount()
-	proposerBalance, err := chain.Governance.ComputeProposerBalance(ctx)
+	proposerBalance, err := chain.Governance.ComputeProposerBalance(ctx, false)
 	requireT.NoError(err)
 
 	chain.Faucet.FundAccounts(ctx, t, integration.NewFundedAccount(proposer, proposerBalance))
@@ -110,6 +116,7 @@ func runUpgrade(
 		"Upgrade chain",
 		"Upgrade "+upgradeName,
 		"Running "+upgradeName+" in integration tests",
+		false,
 	)
 
 	requireT.NoError(err)
@@ -144,7 +151,7 @@ func runUpgrade(
 	assert.Equal(t, upgradeHeight, currentPlan.Plan.Height)
 
 	// Verify that we are before the upgrade
-	infoWaitingBlockRes, err := tmQueryClient.GetLatestBlock(ctx, &tmservice.GetLatestBlockRequest{})
+	infoWaitingBlockRes, err := tmQueryClient.GetLatestBlock(ctx, &cmtservice.GetLatestBlockRequest{})
 	requireT.NoError(err)
 	requireT.Less(infoWaitingBlockRes.Block.Header.Height, upgradeHeight) //nolint:staticcheck
 
@@ -164,7 +171,7 @@ func runUpgrade(
 		requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		var err error
-		infoAfterBlockRes, err := tmQueryClient.GetLatestBlock(requestCtx, &tmservice.GetLatestBlockRequest{})
+		infoAfterBlockRes, err := tmQueryClient.GetLatestBlock(requestCtx, &cmtservice.GetLatestBlockRequest{})
 		if err != nil {
 			return retry.Retryable(err)
 		}
@@ -189,8 +196,9 @@ func runUpgrade(
 	t.Logf("Upgrade passed, applied plan height: %d", appliedPlan.Height)
 
 	// The new binary isn't equal to initial
-	infoAfterRes, err := tmQueryClient.GetNodeInfo(ctx, &tmservice.GetNodeInfoRequest{})
+	infoAfterRes, err := tmQueryClient.GetNodeInfo(ctx, &cmtservice.GetNodeInfoRequest{})
 	requireT.NoError(err)
+	requireT.NotEmpty(infoAfterRes.GetApplicationVersion().Version)
 	t.Logf("New binary version: %s", infoAfterRes.ApplicationVersion.Version)
 	assert.NotEqual(t, infoAfterRes.ApplicationVersion.Version, infoBeforeRes.ApplicationVersion.Version)
 }

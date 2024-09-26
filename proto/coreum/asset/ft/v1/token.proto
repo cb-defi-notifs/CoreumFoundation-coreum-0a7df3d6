@@ -14,6 +14,9 @@ enum Feature {
   whitelisting = 3;
   ibc = 4;
   block_smart_contracts = 5;
+  clawback = 6;
+  extension = 7;
+  block_dex = 8;
 }
 
 // Definition defines the fungible token settings to store.
@@ -27,17 +30,19 @@ message Definition {
   // burn_amount. This value will be burnt on top of the send amount.
   string burn_rate = 4 [
     (gogoproto.nullable) = false,
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Dec"
+    (gogoproto.customtype) = "cosmossdk.io/math.LegacyDec"
   ];
   // send_commission_rate is a number between 0 and 1 which will be multiplied by send amount to determine
-  // amount sent to the token issuer account.
+  // amount sent to the token admin account.
   string send_commission_rate = 5 [
     (gogoproto.nullable) = false,
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Dec"
+    (gogoproto.customtype) = "cosmossdk.io/math.LegacyDec"
   ];
   uint32 version = 6;
   string uri = 7 [(gogoproto.customname) = "URI"];
   string uri_hash = 8 [(gogoproto.customname) = "URIHash"];
+  string extension_cw_address = 9 [(gogoproto.customname) = "ExtensionCWAddress"];
+  string admin = 10;
 }
 
 // Token is a full representation of the fungible token.
@@ -56,17 +61,20 @@ message Token {
   // burn_amount. This value will be burnt on top of the send amount.
   string burn_rate = 9 [
     (gogoproto.nullable) = false,
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Dec"
+    (gogoproto.customtype) = "cosmossdk.io/math.LegacyDec"
   ];
   // send_commission_rate is a number between 0 and 1 which will be multiplied by send amount to determine
-  // amount sent to the token issuer account.
+  // amount sent to the token admin account.
   string send_commission_rate = 10 [
     (gogoproto.nullable) = false,
-    (gogoproto.customtype) = "github.com/cosmos/cosmos-sdk/types.Dec"
+    (gogoproto.customtype) = "cosmossdk.io/math.LegacyDec"
   ];
   uint32 version = 11;
   string uri = 12 [(gogoproto.customname) = "URI"];
   string uri_hash = 13 [(gogoproto.customname) = "URIHash"];
+  string extension_cw_address = 14 [(gogoproto.customname) = "ExtensionCWAddress"];
+  string admin = 15;
+  DEXSettings dex_settings = 16 [(gogoproto.customname) = "DEXSettings"];
 }
 
 // DelayedTokenUpgradeV1 is executed by the delay module when it's time to enable IBC.
@@ -90,4 +98,13 @@ message TokenUpgradeV1Status {
 // TokenUpgradeStatuses defines all statuses of the token migrations.
 message TokenUpgradeStatuses {
   TokenUpgradeV1Status v1 = 1;
+}
+
+// DEXSettings defines the token settings of the dex.
+message DEXSettings {
+  // unified_ref_amount is the approximate amount you need to by 1USD, used to define the price tick size
+  string unified_ref_amount = 1 [
+    (gogoproto.nullable) = false,
+    (gogoproto.customtype) = "cosmossdk.io/math.LegacyDec"
+  ];
 }

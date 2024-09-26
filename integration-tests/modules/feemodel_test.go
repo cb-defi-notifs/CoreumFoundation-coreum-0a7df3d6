@@ -6,6 +6,7 @@ import (
 	"context"
 	"testing"
 
+	sdkmath "cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
@@ -65,7 +66,8 @@ func TestFeeModelQueryingGasPriceRecommendation(t *testing.T) {
 
 // TestFeeModelProposalParamChange checks that feemodel param change proposal works correctly.
 func TestFeeModelProposalParamChange(t *testing.T) {
-	t.Parallel()
+	// Since this test changes global fee config we can't run it in parallel with other tests.
+	// That's why t.Parallel() is not here.
 
 	ctx, chain := integrationtests.NewCoreumTestingContext(t)
 
@@ -75,7 +77,7 @@ func TestFeeModelProposalParamChange(t *testing.T) {
 
 	// Create new proposer.
 	proposer := chain.GenAccount()
-	proposerBalance, err := chain.Governance.ComputeProposerBalance(ctx)
+	proposerBalance, err := chain.Governance.ComputeProposerBalance(ctx, false)
 	// For the test we need to create the proposal twice.
 	proposerBalance = proposerBalance.Add(proposerBalance)
 	requireT.NoError(err)
@@ -87,7 +89,7 @@ func TestFeeModelProposalParamChange(t *testing.T) {
 
 	// Create invalid proposal MaxGasPriceMultiplier = 1.
 	newParams := oldParams
-	newParams.Model.MaxGasPriceMultiplier = sdk.OneDec()
+	newParams.Model.MaxGasPriceMultiplier = sdkmath.LegacyOneDec()
 
 	proposalMsg, err := chain.Governance.NewMsgSubmitProposal(
 		ctx, proposer,
@@ -96,6 +98,7 @@ func TestFeeModelProposalParamChange(t *testing.T) {
 			Authority: authtypes.NewModuleAddress(govtypes.ModuleName).String(),
 		}},
 		"-", "-", "-",
+		false,
 	)
 
 	requireT.NoError(err)
@@ -105,7 +108,9 @@ func TestFeeModelProposalParamChange(t *testing.T) {
 	// Create proposal to change MaxDiscount.
 	feeModelParamsRes, err = feeModelClient.Params(ctx, &feemodeltypes.QueryParamsRequest{})
 	requireT.NoError(err)
-	targetMaxDiscount := sdk.MustNewDecFromStr("0.12345")
+
+	// Don't change max discount drastically just decrease it by 1%.
+	targetMaxDiscount := feeModelParamsRes.Params.Model.MaxDiscount.Mul(sdkmath.LegacyMustNewDecFromStr("0.99"))
 	newParams = feeModelParamsRes.Params
 	newParams.Model.MaxDiscount = targetMaxDiscount
 	requireT.NoError(err)

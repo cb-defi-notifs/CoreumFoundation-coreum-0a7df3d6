@@ -5,7 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cosmos/cosmos-sdk/client/grpc/tmservice"
+	sdkmath "cosmossdk.io/math"
+	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
 	govtypesv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
@@ -17,7 +18,9 @@ import (
 	"github.com/CoreumFoundation/coreum/v4/testutil/event"
 )
 
-const submitProposalGas = 400_000
+const (
+	submitProposalGas = 400_000
+)
 
 // Governance keep the test chain predefined account for the governance operations via v1 API only.
 type Governance struct {
@@ -48,16 +51,19 @@ func NewGovernance(chainCtx ChainContext, stakerMnemonics []string, faucet Fauce
 }
 
 // ComputeProposerBalance computes the balance required for the proposer.
-func (g Governance) ComputeProposerBalance(ctx context.Context) (sdk.Coin, error) {
+func (g Governance) ComputeProposerBalance(ctx context.Context, expedited bool) (sdk.Coin, error) {
 	govParams, err := g.QueryGovParams(ctx)
 	if err != nil {
 		return sdk.Coin{}, err
 	}
 
 	minDeposit := govParams.MinDeposit[0]
+	if expedited {
+		minDeposit = govParams.ExpeditedMinDeposit[0]
+	}
 	return g.chainCtx.NewCoin(minDeposit.Amount.Add(
 		g.chainCtx.ChainSettings.GasPrice.
-			Mul(sdk.NewDec(int64(submitProposalGas))).
+			Mul(sdkmath.LegacyNewDec(int64(submitProposalGas))).
 			Ceil().
 			RoundInt())), nil
 }
@@ -115,11 +121,11 @@ func (g Governance) ProposalFromMsgAndVote(
 		proposer = g.chainCtx.GenAccount()
 	}
 
-	proposerBalance, err := g.ComputeProposerBalance(ctx)
+	proposerBalance, err := g.ComputeProposerBalance(ctx, false)
 	require.NoError(t, err)
 	g.faucet.FundAccounts(ctx, t, NewFundedAccount(proposer, proposerBalance))
 
-	proposalMsg, err := g.NewMsgSubmitProposal(ctx, proposer, msgs, metadata, title, summary)
+	proposalMsg, err := g.NewMsgSubmitProposal(ctx, proposer, msgs, metadata, title, summary, false)
 	require.NoError(t, err)
 
 	g.ProposeAndVote(ctx, t, proposalMsg, option)
@@ -163,14 +169,19 @@ func (g Governance) NewMsgSubmitProposal(
 	metadata string,
 	title string,
 	summary string,
+	expedited bool,
 ) (*govtypesv1.MsgSubmitProposal, error) {
 	govParams, err := g.QueryGovParams(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	minDeposit := govParams.MinDeposit
+	if expedited {
+		minDeposit = govParams.ExpeditedMinDeposit
+	}
 	msg, err := govtypesv1.NewMsgSubmitProposal(
-		messages, govParams.MinDeposit, proposer.String(), metadata, title, summary,
+		messages, minDeposit, proposer.String(), metadata, title, summary, expedited,
 	)
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -205,6 +216,7 @@ func (g Governance) VoteAllWeighted(
 	})
 }
 
+//nolint:dupl // GovernanceLegacy duplicates Governance mostly with slight changes but reusing code doesn't make sense.
 func (g Governance) voteAll(ctx context.Context, msgFunc func(sdk.AccAddress) sdk.Msg) error {
 	select {
 	case <-ctx.Done():
@@ -218,12 +230,9 @@ func (g Governance) voteAll(ctx context.Context, msgFunc func(sdk.AccAddress) sd
 	txHashes := make([]string, 0, len(g.stakerAccounts))
 	for _, staker := range g.stakerAccounts {
 		msg := msgFunc(staker)
+		txf := g.chainCtx.TxFactoryAuto()
 
-		txf := g.chainCtx.TxFactory().
-			WithSimulateAndExecute(true)
-
-		clientCtx := g.chainCtx.ClientContext.
-			WithAwaitTx(false)
+		clientCtx := g.chainCtx.ClientContext.WithAwaitTx(false)
 
 		res, err := client.BroadcastTx(ctx, clientCtx.WithFromAddress(staker), txf, msg)
 		if err != nil {
@@ -251,11 +260,12 @@ func (g Governance) WaitForVotingToFinalize(ctx context.Context, proposalID uint
 		return proposal.Status, err
 	}
 
-	tmQueryClient := tmservice.NewServiceClient(g.chainCtx.ClientContext)
-	blockRes, err := tmQueryClient.GetLatestBlock(ctx, &tmservice.GetLatestBlockRequest{})
+	tmQueryClient := cmtservice.NewServiceClient(g.chainCtx.ClientContext)
+	blockRes, err := tmQueryClient.GetLatestBlock(ctx, &cmtservice.GetLatestBlockRequest{})
 	if err != nil {
 		return proposal.Status, errors.WithStack(err)
 	}
+
 	if blockRes.SdkBlock.Header.Time.Before(*proposal.VotingEndTime) {
 		waitCtx, waitCancel := context.WithTimeout(ctx, proposal.VotingEndTime.Sub(blockRes.SdkBlock.Header.Time))
 		defer waitCancel()
@@ -266,7 +276,11 @@ func (g Governance) WaitForVotingToFinalize(ctx context.Context, proposalID uint
 		}
 	}
 
-	retryCtx, retryCancel := context.WithTimeout(ctx, 10*time.Second)
+	params, err := g.QueryGovParams(ctx)
+	if err != nil {
+		return proposal.Status, err
+	}
+	retryCtx, retryCancel := context.WithTimeout(ctx, *params.VotingPeriod)
 	defer retryCancel()
 
 	err = retry.Do(retryCtx, time.Second, func() error {

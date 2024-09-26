@@ -30,27 +30,29 @@ func TestQueryTokens(t *testing.T) {
 		Features: []types.Feature{
 			types.Feature_whitelisting,
 		},
-		BurnRate:           sdk.MustNewDecFromStr("0.1"),
-		SendCommissionRate: sdk.MustNewDecFromStr("0.2"),
+		BurnRate:           sdkmath.LegacyMustNewDecFromStr("0.1"),
+		SendCommissionRate: sdkmath.LegacyMustNewDecFromStr("0.2"),
 	}
 
 	ctx := testNetwork.Validators[0].ClientCtx
 
 	initialAmount := sdkmath.NewInt(100)
-	denom := issue(requireT, ctx, token, initialAmount, testNetwork)
+	denom := issue(requireT, ctx, token, initialAmount, nil, testNetwork)
 
 	var resp types.QueryTokensResponse
-	requireT.NoError(coreumclitestutil.ExecQueryCmd(
+	coreumclitestutil.ExecQueryCmd(
+		t,
 		ctx,
 		cli.CmdQueryTokens(),
 		[]string{issuer.String(), "--limit", "1"},
 		&resp,
-	))
+	)
 
 	expectedToken := token
 	expectedToken.Denom = denom
 	expectedToken.Issuer = testNetwork.Validators[0].Address.String()
 	expectedToken.Version = types.CurrentTokenVersion
+	expectedToken.Admin = testNetwork.Validators[0].Address.String()
 	requireT.Equal(expectedToken, resp.Tokens[0])
 }
 
@@ -67,30 +69,32 @@ func TestQueryToken(t *testing.T) {
 		Features: []types.Feature{
 			types.Feature_whitelisting,
 		},
-		BurnRate:           sdk.MustNewDecFromStr("0.1"),
-		SendCommissionRate: sdk.MustNewDecFromStr("0.2"),
+		BurnRate:           sdkmath.LegacyMustNewDecFromStr("0.1"),
+		SendCommissionRate: sdkmath.LegacyMustNewDecFromStr("0.2"),
 	}
 	ctx := testNetwork.Validators[0].ClientCtx
 	initialAmount := sdkmath.NewInt(100)
-	denom := issue(requireT, ctx, token, initialAmount, testNetwork)
+	denom := issue(requireT, ctx, token, initialAmount, nil, testNetwork)
 
 	var resp types.QueryTokenResponse
-	requireT.NoError(coreumclitestutil.ExecQueryCmd(ctx, cli.CmdQueryToken(), []string{denom}, &resp))
+	coreumclitestutil.ExecQueryCmd(t, ctx, cli.CmdQueryToken(), []string{denom}, &resp)
 
 	expectedToken := token
 	expectedToken.Denom = denom
 	expectedToken.Issuer = testNetwork.Validators[0].Address.String()
 	expectedToken.Version = types.CurrentTokenVersion
+	expectedToken.Admin = testNetwork.Validators[0].Address.String()
 	requireT.Equal(expectedToken, resp.Token)
 
 	// query balance
 	var respBalance types.QueryBalanceResponse
-	requireT.NoError(coreumclitestutil.ExecQueryCmd(
+	coreumclitestutil.ExecQueryCmd(
+		t,
 		ctx,
 		cli.CmdQueryBalance(),
 		[]string{expectedToken.Issuer, denom},
 		&respBalance,
-	))
+	)
 	requireT.Equal(initialAmount.String(), respBalance.Balance.String())
 }
 
@@ -109,10 +113,10 @@ func TestCmdTokenUpgradeStatuses(t *testing.T) {
 	ctx := testNetwork.Validators[0].ClientCtx
 
 	initialAmount := sdkmath.NewInt(100)
-	denom := issue(requireT, ctx, token, initialAmount, testNetwork)
+	denom := issue(requireT, ctx, token, initialAmount, nil, testNetwork)
 
 	var statusesRes types.QueryTokenUpgradeStatusesResponse
-	requireT.NoError(coreumclitestutil.ExecQueryCmd(ctx, cli.CmdTokenUpgradeStatuses(), []string{denom}, &statusesRes))
+	coreumclitestutil.ExecQueryCmd(t, ctx, cli.CmdTokenUpgradeStatuses(), []string{denom}, &statusesRes)
 	// we can't check non-empty values
 	requireT.Nil(statusesRes.Statuses.V1)
 }
@@ -125,7 +129,7 @@ func TestQueryParams(t *testing.T) {
 	ctx := testNetwork.Validators[0].ClientCtx
 
 	var resp types.QueryParamsResponse
-	requireT.NoError(coreumclitestutil.ExecQueryCmd(ctx, cli.CmdQueryParams(), []string{}, &resp))
+	coreumclitestutil.ExecQueryCmd(t, ctx, cli.CmdQueryParams(), []string{}, &resp)
 	expectedIssueFee := sdk.Coin{Denom: constant.DenomDev, Amount: sdkmath.NewInt(10_000_000)}
 	requireT.Equal(expectedIssueFee, resp.Params.IssueFee)
 }

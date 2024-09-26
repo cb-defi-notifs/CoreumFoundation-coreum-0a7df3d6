@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"testing"
 
+	sdkmath "cosmossdk.io/math"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
-	ibctypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
+	ibctypes "github.com/cosmos/ibc-go/v8/modules/apps/transfer/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -32,7 +33,7 @@ func TestValidatePrecision(t *testing.T) {
 		{precision: 3},
 		{precision: 10},
 		{precision: types.MaxPrecision},
-		{precision: 0, expectError: true},
+		{precision: 0},
 		{precision: types.MaxPrecision + 1, expectError: true},
 		{precision: 100_000, expectError: true},
 	}
@@ -231,14 +232,25 @@ func TestValidateFeatures(t *testing.T) {
 			Ok: true,
 		},
 		{
-			Name:     "all",
-			Features: allFeatures,
-			Ok:       true,
+			Name: "extension and block_smart_contract",
+			Features: []types.Feature{
+				types.Feature_block_smart_contracts,
+				types.Feature_extension,
+			},
+			Ok: false,
 		},
 		{
-			Name:     "all except one",
-			Features: allFeatures[1:],
-			Ok:       true,
+			Name: "extension and ibc",
+			Features: []types.Feature{
+				types.Feature_ibc,
+				types.Feature_extension,
+			},
+			Ok: false,
+		},
+		{
+			Name:     "all",
+			Features: allFeatures,
+			Ok:       false,
 		},
 
 		// invalid cases
@@ -358,7 +370,7 @@ func TestValidateBurnRate(t *testing.T) {
 	}
 
 	parseAndValidate := func(in string) error {
-		rate, err := sdk.NewDecFromStr(in)
+		rate, err := sdkmath.LegacyNewDecFromStr(in)
 		if err != nil {
 			return err
 		}
@@ -440,7 +452,7 @@ func TestValidateSendCommissionRate(t *testing.T) {
 	}
 
 	parseAndValidate := func(in string) error {
-		rate, err := sdk.NewDecFromStr(in)
+		rate, err := sdkmath.LegacyNewDecFromStr(in)
 		if err != nil {
 			return err
 		}
@@ -471,9 +483,10 @@ func TestDefinition_CheckFeatureAllowed(t *testing.T) {
 	type fields struct {
 		Denom              string
 		Issuer             string
+		Admin              string
 		Features           []types.Feature
-		BurnRate           sdk.Dec
-		SendCommissionRate sdk.Dec
+		BurnRate           sdkmath.LegacyDec
+		SendCommissionRate sdkmath.LegacyDec
 	}
 	type args struct {
 		addr    sdk.AccAddress
@@ -489,6 +502,7 @@ func TestDefinition_CheckFeatureAllowed(t *testing.T) {
 			name: "minting_feature_enabled_for_issuer",
 			fields: fields{
 				Issuer: issuer.String(),
+				Admin:  issuer.String(),
 				Features: []types.Feature{
 					types.Feature_minting,
 				},
@@ -503,6 +517,7 @@ func TestDefinition_CheckFeatureAllowed(t *testing.T) {
 			name: "burning_feature_always_enabled_for_issuer",
 			fields: fields{
 				Issuer: issuer.String(),
+				Admin:  issuer.String(),
 				Features: []types.Feature{
 					types.Feature_burning,
 				},
@@ -517,6 +532,7 @@ func TestDefinition_CheckFeatureAllowed(t *testing.T) {
 			name: "burning_feature_enabled_for_non_issuer",
 			fields: fields{
 				Issuer: issuer.String(),
+				Admin:  issuer.String(),
 			},
 			args: args{
 				addr:    issuer,
@@ -528,6 +544,7 @@ func TestDefinition_CheckFeatureAllowed(t *testing.T) {
 			name: "minting_feature_disabled_for_non_issuer",
 			fields: fields{
 				Issuer: issuer.String(),
+				Admin:  issuer.String(),
 				Features: []types.Feature{
 					types.Feature_minting,
 				},
@@ -568,6 +585,7 @@ func TestDefinition_CheckFeatureAllowed(t *testing.T) {
 			def := types.Definition{
 				Denom:              tt.fields.Denom,
 				Issuer:             tt.fields.Issuer,
+				Admin:              tt.fields.Admin,
 				Features:           tt.fields.Features,
 				BurnRate:           tt.fields.BurnRate,
 				SendCommissionRate: tt.fields.SendCommissionRate,

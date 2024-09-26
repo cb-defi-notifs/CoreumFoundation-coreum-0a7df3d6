@@ -1,7 +1,7 @@
 package keeper
 
 import (
-	"sort"
+	"encoding/json"
 
 	sdkerrors "cosmossdk.io/errors"
 	sdkmath "cosmossdk.io/math"
@@ -9,9 +9,44 @@ import (
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 
 	"github.com/CoreumFoundation/coreum/v4/x/asset/ft/types"
+	"github.com/CoreumFoundation/coreum/v4/x/wasm"
 	cwasmtypes "github.com/CoreumFoundation/coreum/v4/x/wasm/types"
 	wibctransfertypes "github.com/CoreumFoundation/coreum/v4/x/wibctransfer/types"
 )
+
+// extension method calls.
+const (
+	// the function name of the extension smart contract, which will be invoked
+	// when doing the transfer.
+	ExtenstionTransferMethod = "extension_transfer"
+)
+
+// sudoExtensionTransferMsg contains the fields passed to extension method call.
+//
+//nolint:tagliatelle // these will be exposed to rust and must be snake case.
+type sudoExtensionTransferMsg struct {
+	Recipient        string                       `json:"recipient,omitempty"`
+	Sender           string                       `json:"sender,omitempty"`
+	TransferAmount   sdkmath.Int                  `json:"transfer_amount,omitempty"`
+	BurnAmount       sdkmath.Int                  `json:"burn_amount,omitempty"`
+	CommissionAmount sdkmath.Int                  `json:"commission_amount,omitempty"`
+	Context          sudoExtensionTransferContext `json:"context,omitempty"`
+}
+
+//nolint:tagliatelle // these will be exposed to rust and must be snake case.
+type sudoExtensionTransferContext struct {
+	SenderIsSmartContract    bool   `json:"sender_is_smart_contract"`
+	RecipientIsSmartContract bool   `json:"recipient_is_smart_contract"`
+	IBCPurpose               string `json:"ibc_purpose"`
+}
+
+func ibcPurposeToExtensionString(ctx sdk.Context) string {
+	ibcPurpose, ok := wibctransfertypes.GetPurpose(ctx)
+	if !ok {
+		return "none"
+	}
+	return string(ibcPurpose)
+}
 
 // BeforeSendCoins checks that a transfer request is allowed or not.
 func (k Keeper) BeforeSendCoins(ctx sdk.Context, fromAddress, toAddress sdk.AccAddress, coins sdk.Coins) error {
@@ -23,114 +58,189 @@ func (k Keeper) BeforeSendCoins(ctx sdk.Context, fromAddress, toAddress sdk.AccA
 }
 
 // BeforeInputOutputCoins extends InputOutputCoins method of the bank keeper.
-func (k Keeper) BeforeInputOutputCoins(ctx sdk.Context, inputs []banktypes.Input, outputs []banktypes.Output) error {
-	if len(inputs) > 1 {
-		return banktypes.ErrMultipleSenders
-	}
-	if len(inputs) == 0 {
-		return banktypes.ErrNoInputs
-	}
-	return k.applyFeatures(ctx, inputs[0], outputs)
-}
-
-type accountOperationMap map[string]sdkmath.Int
-
-type groupedByDenomAccountOperations map[string]accountOperationMap
-
-func (g groupedByDenomAccountOperations) add(address string, coins sdk.Coins) {
-	for _, coin := range coins {
-		accountBalances, ok := g[coin.Denom]
-		if !ok {
-			accountBalances = make(map[string]sdkmath.Int)
-		}
-		oldAmount, ok := accountBalances[address]
-		if !ok {
-			oldAmount = sdkmath.ZeroInt()
-		}
-
-		oldAmount = oldAmount.Add(coin.Amount)
-		accountBalances[address] = oldAmount
-		g[coin.Denom] = accountBalances
-	}
+func (k Keeper) BeforeInputOutputCoins(ctx sdk.Context, input banktypes.Input, outputs []banktypes.Output) error {
+	return k.applyFeatures(ctx, input, outputs)
 }
 
 func (k Keeper) applyFeatures(ctx sdk.Context, input banktypes.Input, outputs []banktypes.Output) error {
-	groupOutputs := make(groupedByDenomAccountOperations)
-	for _, out := range outputs {
-		groupOutputs.add(out.Address, out.Coins)
-	}
-
-	return k.applyRules(ctx, input, groupOutputs)
-}
-
-func (k Keeper) applyRules(ctx sdk.Context, input banktypes.Input, outputs groupedByDenomAccountOperations) error {
+	outputCoinsSum := sdk.NewCoins()
 	sender, err := sdk.AccAddressFromBech32(input.Address)
 	if err != nil {
 		return sdkerrors.Wrapf(err, "invalid address %s", input.Address)
 	}
-
-	for _, coin := range input.Coins {
-		def, err := k.GetDefinition(ctx, coin.Denom)
-		if types.ErrInvalidDenom.Is(err) || types.ErrTokenNotFound.Is(err) {
-			continue
-		}
-
-		outOps := outputs[coin.Denom]
-
-		issuer, err := sdk.AccAddressFromBech32(def.Issuer)
+	for _, output := range outputs {
+		outputCoinsSum = outputCoinsSum.Add(output.Coins...)
+		recipient, err := sdk.AccAddressFromBech32(output.Address)
 		if err != nil {
-			return sdkerrors.Wrapf(err, "invalid address %s", def.Issuer)
+			return sdkerrors.Wrapf(err, "invalid address %s", input.Address)
 		}
+		for _, coin := range output.Coins {
+			def, err := k.GetDefinition(ctx, coin.Denom)
+			if sdkerrors.IsOf(err, types.ErrInvalidDenom, types.ErrTokenNotFound) {
+				// if the token doesn't have the definition we validate DEX locking rule only.
+				balance := k.bankKeeper.GetBalance(ctx, sender, coin.Denom)
+				if err := k.validateCoinIsNotLockedByDEXAndBank(ctx, sender, balance, coin); err != nil {
+					return err
+				}
 
-		burnAmount := k.ApplyRate(ctx, def.BurnRate, issuer, sender, outOps)
-		if burnAmount.IsPositive() {
-			if err := k.burnIfSpendable(ctx, sender, def, burnAmount); err != nil {
+				if err := k.bankKeeper.SendCoins(ctx, sender, recipient, sdk.NewCoins(coin)); err != nil {
+					return err
+				}
+				continue
+			} else if err != nil {
 				return err
 			}
-		}
 
-		commissionAmount := k.ApplyRate(ctx, def.SendCommissionRate, issuer, sender, outOps)
-		if commissionAmount.IsPositive() {
-			commissionCoin := sdk.NewCoins(sdk.NewCoin(def.Denom, commissionAmount))
-			if err := k.bankKeeper.SendCoins(ctx, sender, issuer, commissionCoin); err != nil {
+			// This check is effective when IBC transfer is acknowledged by the peer chain or timed out.
+			// It happens in the following situations:
+			// - when transfer succeeded
+			// - when transfer has been rejected by the other chain and funds should be refunded.
+			// - when transfer has timedout and funds should be refuned.
+			// So, whenever it happens here, it means that funds are going to be refunded
+			// back to the sender by the IBC transfer module.
+			// It should succeed even if the issuer decided, for whatever reason, to freeze the escrow address.
+			// It is done before checking for global freeze because refunding should not be blocked by this.
+			// Otherwise, funds would be lost forever, being blocked on the escrow account.
+			if wibctransfertypes.IsPurposeAck(ctx) || wibctransfertypes.IsPurposeTimeout(ctx) {
+				if err := k.bankKeeper.SendCoins(ctx, sender, recipient, sdk.NewCoins(coin)); err != nil {
+					return err
+				}
+				continue
+			}
+
+			burnAmount := k.CalculateRate(ctx, def.BurnRate, sender, coin)
+			commissionAmount := k.CalculateRate(ctx, def.SendCommissionRate, sender, coin)
+
+			if def.IsFeatureEnabled(types.Feature_extension) {
+				balance := k.bankKeeper.GetBalance(ctx, sender, coin.Denom)
+				if err := k.validateCoinIsNotLockedByDEXAndBank(ctx, sender, balance, coin); err != nil {
+					return err
+				}
+
+				if err := k.invokeAssetExtension(ctx, sender, recipient, def, coin, commissionAmount, burnAmount); err != nil {
+					return err
+				}
+				// We will not enforce any policies(e.g whitelisting, burn rate), apart from DEX locking, or perform bank
+				//	transfers if the token has extensions. It is up to the contract to enforce them as needed.
+				//	As a result we will skip the next operations in this for loop.
+				continue
+			}
+
+			senderOrReceiverIsAdmin := def.Admin == sender.String() || def.Admin == recipient.String()
+
+			if !senderOrReceiverIsAdmin && commissionAmount.IsPositive() {
+				adminAddr := sdk.MustAccAddressFromBech32(def.Admin)
+				commissionCoin := sdk.NewCoins(sdk.NewCoin(def.Denom, commissionAmount))
+				if err := k.bankKeeper.SendCoins(ctx, sender, adminAddr, commissionCoin); err != nil {
+					return err
+				}
+			}
+
+			if !senderOrReceiverIsAdmin && burnAmount.IsPositive() {
+				if err := k.burnIfSpendable(ctx, sender, def, burnAmount); err != nil {
+					return err
+				}
+			}
+
+			if err := k.validateCoinSpendable(ctx, sender, def, coin.Amount); err != nil {
 				return err
 			}
-		}
 
-		if err := k.isCoinSpendable(ctx, sender, def, coin.Amount); err != nil {
-			return err
-		}
-
-		if err := iterateMapDeterministic(outOps, func(account string, amount sdkmath.Int) error {
-			accountAddr, err := sdk.AccAddressFromBech32(account)
-			if err != nil {
-				return sdkerrors.Wrapf(err, "invalid address %s", account)
+			if err := k.validateCoinReceivable(ctx, recipient, def, coin.Amount); err != nil {
+				return err
 			}
-			return k.isCoinReceivable(ctx, accountAddr, def, amount)
-		}); err != nil {
-			return err
-		}
-		if err != nil {
-			return err
+
+			if err := k.bankKeeper.SendCoins(ctx, sender, recipient, sdk.NewCoins(coin)); err != nil {
+				return err
+			}
 		}
 	}
 
+	if !outputCoinsSum.Equal(input.Coins) {
+		return banktypes.ErrInputOutputMismatch
+	}
 	return nil
 }
 
-// ApplyRate calculates how the burn or commission amount should be calculated.
-func (k Keeper) ApplyRate(
+// invokeAssetExtension calls the smart contract of the extension. This smart contract is
+// responsible to enforce any policies and do the final tranfer. The amount attached to the call
+// is the send amount plus the burn and commission amount.
+func (k Keeper) invokeAssetExtension(
 	ctx sdk.Context,
-	rate sdk.Dec,
-	issuer,
 	sender sdk.AccAddress,
-	outOps accountOperationMap,
+	recipient sdk.AccAddress,
+	def types.Definition,
+	sendAmount sdk.Coin,
+	commissionAmount sdkmath.Int,
+	burnAmount sdkmath.Int,
+) error {
+	extensionContract, err := sdk.AccAddressFromBech32(def.ExtensionCWAddress)
+	if err != nil {
+		return err
+	}
+
+	// We need this if statement so we will not have an infinite loop. Otherwise
+	// when we call Execute method in wasm keeper, in which we have funds transfer,
+	// then we will end up in an infinite recursoin.
+	if extensionContract.Equals(sender) {
+		return k.bankKeeper.SendCoins(ctx, sender, recipient, sdk.NewCoins(sendAmount))
+	}
+
+	attachedFunds := sdk.NewCoins(sendAmount).
+		Add(sdk.NewCoin(def.Denom, commissionAmount)).
+		Add(sdk.NewCoin(def.Denom, burnAmount))
+
+	if err := k.bankKeeper.SendCoins(ctx, sender, extensionContract, attachedFunds); err != nil {
+		return err
+	}
+
+	senderIsSmartContract := cwasmtypes.IsSendingSmartContract(ctx, sender.String()) ||
+		wasm.IsSmartContract(ctx, sender, k.wasmKeeper)
+	recipientIsSmartContract := cwasmtypes.IsReceivingSmartContract(ctx, recipient.String()) ||
+		wasm.IsSmartContract(ctx, recipient, k.wasmKeeper)
+
+	contractMsg := map[string]interface{}{
+		ExtenstionTransferMethod: sudoExtensionTransferMsg{
+			Sender:           sender.String(),
+			Recipient:        recipient.String(),
+			TransferAmount:   sendAmount.Amount,
+			BurnAmount:       burnAmount,
+			CommissionAmount: commissionAmount,
+			Context: sudoExtensionTransferContext{
+				SenderIsSmartContract:    senderIsSmartContract,
+				RecipientIsSmartContract: recipientIsSmartContract,
+				IBCPurpose:               ibcPurposeToExtensionString(ctx),
+			},
+		},
+	}
+	contractMsgBytes, err := json.Marshal(contractMsg)
+	if err != nil {
+		return err
+	}
+
+	_, err = k.wasmPermissionedKeeper.Sudo(
+		ctx,
+		extensionContract,
+		contractMsgBytes,
+	)
+	if err != nil {
+		return types.ErrExtensionCallFailed.Wrapf("was error: %s", err)
+	}
+	return nil
+}
+
+// CalculateRate calculates how the burn or commission amount should be calculated.
+func (k Keeper) CalculateRate(
+	ctx sdk.Context,
+	rate sdkmath.LegacyDec,
+	sender sdk.AccAddress,
+	amount sdk.Coin,
 ) sdkmath.Int {
 	// We decided that rates should not be charged on incoming IBC transfers.
 	// According to our current protocol, it cannot be done because sender pays the rates, meaning that escrow address
 	// would be charged leading to breaking the IBC mechanics.
 	if wibctransfertypes.IsPurposeIn(ctx) {
-		return sdk.ZeroInt()
+		return sdkmath.ZeroInt()
 	}
 
 	// Context is marked with ACK purpose in two cases:
@@ -139,75 +249,22 @@ func (k Keeper) ApplyRate(
 	// This function is called only in the negative case, when the IBC transfer must be rolled back and funds
 	// must be sent back to the sender. In this case we should not charge the rates.
 	if wibctransfertypes.IsPurposeAck(ctx) {
-		return sdk.ZeroInt()
+		return sdkmath.ZeroInt()
 	}
 
 	// Same thing as above just in case of IBC timeout.
 	if wibctransfertypes.IsPurposeTimeout(ctx) {
-		return sdk.ZeroInt()
+		return sdkmath.ZeroInt()
 	}
-	// Since burning & send commissions are not applied when sending to/from token issuer or from any smart contract,
-	// we can't simply apply original burn rate or send commission rates when bank multisend contains issuer or smart
-	//  contract in input or issuer in outputs.
-	// To recalculate new adjusted amount we exclude amount sent to issuers.
 
-	// Examples
-	// burn_rate: 10%
-
-	// inputs:
-	// 100
-
-	// outputs:
-	// 75
-	// 25 <-- issuer
-
-	// In this case commissioned amount is: 75
-	// Expected commission: 75 * 10% = 7.5
-	// which is deduces from the sender account.
 	if rate.IsNil() || !rate.IsPositive() {
-		return sdk.ZeroInt()
-	}
-
-	if sender.String() == issuer.String() {
-		return sdk.ZeroInt()
+		return sdkmath.ZeroInt()
 	}
 
 	// We do not apply burn and commission rate if sender is a smart contract address.
 	if cwasmtypes.IsSendingSmartContract(ctx, sender.String()) {
-		return sdk.ZeroInt()
+		return sdkmath.ZeroInt()
 	}
 
-	taxableOutputSum := sdk.NewInt(0)
-	issuerStr := issuer.String()
-	for account, amount := range outOps {
-		if account == issuerStr {
-			continue
-		}
-		taxableOutputSum = taxableOutputSum.Add(amount)
-	}
-
-	return rate.MulInt(taxableOutputSum).Ceil().RoundInt()
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, len(m))
-	i := 0
-	for k := range m {
-		keys[i] = k
-		i++
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	return keys
-}
-
-func iterateMapDeterministic[V any](m map[string]V, fn func(key string, value V) error) error {
-	keys := sortedKeys(m)
-	for _, key := range keys {
-		v := m[key]
-		if err := fn(key, v); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return rate.MulInt(amount.Amount).Ceil().RoundInt()
 }

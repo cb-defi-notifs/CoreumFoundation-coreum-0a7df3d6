@@ -35,12 +35,14 @@ type QueryKeeper interface {
 		pagination *query.PageRequest,
 	) (sdk.Coins, *query.PageResponse, error)
 	GetWhitelistedBalance(ctx sdk.Context, addr sdk.AccAddress, denom string) sdk.Coin
+	GetDEXLockedBalance(ctx sdk.Context, addr sdk.AccAddress, denom string) sdk.Coin
+	GetDEXSettings(ctx sdk.Context, denom string) (types.DEXSettings, error)
 }
 
 // BankKeeper represents required methods of bank keeper.
 type BankKeeper interface {
-	GetBalance(ctx sdk.Context, addr sdk.AccAddress, denom string) sdk.Coin
-	LockedCoins(ctx sdk.Context, addr sdk.AccAddress) sdk.Coins
+	GetBalance(ctx context.Context, addr sdk.AccAddress, denom string) sdk.Coin
+	LockedCoins(ctx context.Context, addr sdk.AccAddress) sdk.Coins
 }
 
 // QueryService serves grpc query requests for assets module.
@@ -107,23 +109,26 @@ func (qs QueryService) TokenUpgradeStatuses(
 
 // Balance returns balance of the denom for the account.
 func (qs QueryService) Balance(
-	goCtx context.Context,
+	ctx context.Context,
 	req *types.QueryBalanceRequest,
 ) (*types.QueryBalanceResponse, error) {
-	ctx := sdk.UnwrapSDKContext(goCtx)
 	account, err := sdk.AccAddressFromBech32(req.Account)
 	if err != nil {
 		return nil, sdkerrors.Wrap(cosmoserrors.ErrInvalidAddress, "invalid account address")
 	}
 
-	locked := qs.bankKeeper.LockedCoins(ctx, account)
-
 	denom := req.GetDenom()
+	vestingLocked := qs.bankKeeper.LockedCoins(ctx, account).AmountOf(denom)
+	dexLocked := qs.keeper.GetDEXLockedBalance(sdk.UnwrapSDKContext(ctx), account, denom).Amount
+
+	sdkCtx := sdk.UnwrapSDKContext(ctx)
 	return &types.QueryBalanceResponse{
-		Balance:     qs.bankKeeper.GetBalance(ctx, account, denom).Amount,
-		Whitelisted: qs.keeper.GetWhitelistedBalance(ctx, account, denom).Amount,
-		Frozen:      qs.keeper.GetFrozenBalance(ctx, account, denom).Amount,
-		Locked:      locked.AmountOf(denom),
+		Balance:         qs.bankKeeper.GetBalance(ctx, account, denom).Amount,
+		Whitelisted:     qs.keeper.GetWhitelistedBalance(sdkCtx, account, denom).Amount,
+		Frozen:          qs.keeper.GetFrozenBalance(sdkCtx, account, denom).Amount,
+		Locked:          vestingLocked.Add(dexLocked),
+		LockedInVesting: vestingLocked,
+		LockedInDEX:     dexLocked,
 	}, nil
 }
 
@@ -200,5 +205,22 @@ func (qs QueryService) WhitelistedBalance(
 
 	return &types.QueryWhitelistedBalanceResponse{
 		Balance: balance,
+	}, nil
+}
+
+// DEXSettings returns DEX settings.
+func (qs QueryService) DEXSettings(
+	goCtx context.Context,
+	req *types.QueryDEXSettingsRequest,
+) (*types.QueryDEXSettingsResponse, error) {
+	ctx := sdk.UnwrapSDKContext(goCtx)
+
+	settings, err := qs.keeper.GetDEXSettings(ctx, req.Denom)
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.QueryDEXSettingsResponse{
+		DEXSettings: settings,
 	}, nil
 }

@@ -55,7 +55,7 @@ func NewOperationFactory(
 func (op *OperationFactory) WeightedOperations() simulation.WeightedOperations {
 	// make the weights updatable by the simulation
 	var weightMsgIssue int
-	op.appParams.GetOrGenerate(op.cdc, OpWeightMsgIssue, &weightMsgIssue, nil,
+	op.appParams.GetOrGenerate(OpWeightMsgIssue, &weightMsgIssue, nil,
 		func(_ *rand.Rand) {
 			weightMsgIssue = DefaultWeightMsgIssue
 		},
@@ -80,10 +80,10 @@ func (op *OperationFactory) simulateMsgIssue(
 
 	err := op.sendMsg(ctx, r, chainID, []cryptotypes.PrivKey{senderAcc.PrivKey}, app, senderAcc.Address, msg)
 	if err != nil {
-		return simtypes.NoOpMsg(types.ModuleName, msg.Type(), "invalid issuance"), nil, err
+		return simtypes.NoOpMsg(types.ModuleName, sdk.MsgTypeURL(msg), "invalid issuance"), nil, err
 	}
 
-	return simtypes.NewOperationMsg(msg, false, "", nil), nil, nil
+	return simtypes.NewOperationMsg(msg, false, ""), nil, nil
 }
 
 func (op *OperationFactory) randomIssueMsg(

@@ -10,12 +10,12 @@ import (
 	"os"
 	"time"
 
-	rosettaCmd "cosmossdk.io/tools/rosetta/cmd"
+	"cosmossdk.io/log"
+	confixcmd "cosmossdk.io/tools/confix/cmd"
 	"github.com/CosmWasm/wasmd/x/wasm"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
-	dbm "github.com/cometbft/cometbft-db"
 	tmcfg "github.com/cometbft/cometbft/config"
-	"github.com/cometbft/cometbft/libs/log"
+	dbm "github.com/cosmos/cosmos-db"
 	"github.com/cosmos/cosmos-sdk/client"
 	clientconfig "github.com/cosmos/cosmos-sdk/client/config"
 	"github.com/cosmos/cosmos-sdk/client/debug"
@@ -29,11 +29,17 @@ import (
 	"github.com/cosmos/cosmos-sdk/server"
 	serverconfig "github.com/cosmos/cosmos-sdk/server/config"
 	servertypes "github.com/cosmos/cosmos-sdk/server/types"
+	simtestutil "github.com/cosmos/cosmos-sdk/testutil/sims"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/types/module"
+	signingtypes "github.com/cosmos/cosmos-sdk/types/tx/signing"
 	authcmd "github.com/cosmos/cosmos-sdk/x/auth/client/cli"
+	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
+	tx "github.com/cosmos/cosmos-sdk/x/auth/tx/config"
 	"github.com/cosmos/cosmos-sdk/x/auth/types"
 	"github.com/cosmos/cosmos-sdk/x/crisis"
 	genutilcli "github.com/cosmos/cosmos-sdk/x/genutil/client/cli"
+	rosettaCmd "github.com/cosmos/rosetta/cmd"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -46,11 +52,17 @@ import (
 
 const ledgerAppName = "Coreum"
 
-// NewRootCmd creates a new root command for simd. It is called once in the
+// NewRootCmd creates a new root command. It is called once in the
 // main function.
 func NewRootCmd() *cobra.Command {
 	// we "pre"-instantiate the application for getting the injected/configured encoding configuration
-	encodingConfig := config.NewEncodingConfig(app.ModuleBasics)
+	tempApp := app.New(log.NewNopLogger(), dbm.NewMemDB(), nil, true, simtestutil.NewAppOptionsWithFlagHome(tempDir()))
+	encodingConfig := config.EncodingConfig{
+		InterfaceRegistry: tempApp.InterfaceRegistry(),
+		Codec:             tempApp.AppCodec(),
+		TxConfig:          tempApp.TxConfig(),
+		Amino:             tempApp.LegacyAmino(),
+	}
 	initClientCtx := client.Context{}.
 		WithCodec(encodingConfig.Codec).
 		WithInterfaceRegistry(encodingConfig.InterfaceRegistry).
@@ -79,7 +91,29 @@ func NewRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if !initClientCtx.Offline {
+				enabledSignModes := make([]signingtypes.SignMode, 0)
+				enabledSignModes = append(enabledSignModes, authtx.DefaultSignModes...)
+				enabledSignModes = append(enabledSignModes, signingtypes.SignMode_SIGN_MODE_TEXTUAL)
+				txConfigOpts := authtx.ConfigOptions{
+					EnabledSignModes:           enabledSignModes,
+					TextualCoinMetadataQueryFn: tx.NewGRPCCoinMetadataQueryFn(initClientCtx),
+				}
+				txConfig, err := authtx.NewTxConfigWithOptions(
+					encodingConfig.Codec,
+					txConfigOpts,
+				)
+				if err != nil {
+					return err
+				}
 
+				initClientCtx = initClientCtx.WithTxConfig(txConfig)
+			}
+			if err := client.SetCmdClientContextHandler(initClientCtx, cmd); err != nil {
+				return err
+			}
+
+			initClientCtx = initClientCtx.WithCmdContext(cmd.Context())
 			if err := client.SetCmdClientContextHandler(initClientCtx, cmd); err != nil {
 				return err
 			}
@@ -91,7 +125,23 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
-	initRootCmd(rootCmd, encodingConfig)
+	initRootCmd(rootCmd, encodingConfig, tempApp.BasicModuleManager)
+	// add keyring to autocli opts
+	autoCliOpts := tempApp.AutoCliOpts()
+	initClientCtx, _ = clientconfig.ReadDefaultValuesFromDefaultClientConfig(initClientCtx)
+	autoCliOpts.Keyring, _ = keyring.NewAutoCLIKeyring(initClientCtx.Keyring)
+	autoCliOpts.ClientCtx = initClientCtx
+
+	if err := autoCliOpts.EnhanceRootCommand(rootCmd); err != nil {
+		panic(err)
+	}
+
+	for _, cmd := range rootCmd.Commands() {
+		if cmd.Use == "tx" {
+			installAwaitBroadcastModeWrapper(cmd)
+			break
+		}
+	}
 
 	return rootCmd
 }
@@ -163,29 +213,32 @@ memory_cache_size = {{ .WASM.MemoryCacheSize }}
 	return customAppTemplate, customAppConfig
 }
 
-func initRootCmd(rootCmd *cobra.Command, encodingConfig config.EncodingConfig) {
+func initRootCmd(
+	rootCmd *cobra.Command,
+	encodingConfig config.EncodingConfig,
+	basicManager module.BasicManager,
+) {
 	cfg := sdk.GetConfig()
 	cfg.Seal()
 
 	rootCmd.AddCommand(
-		InitCmd(app.DefaultNodeHome),
+		InitCmd(basicManager, app.DefaultNodeHome),
 		debug.Cmd(),
-		clientconfig.Cmd(),
+		confixcmd.ConfigCommand(),
 		pruning.Cmd(newApp, app.DefaultNodeHome),
 		snapshot.Cmd(newApp),
-		GenerateDevnetCmd(),
-		GenerateGenesisCmd(),
+		GenerateGenesisCmd(basicManager),
 	)
 
 	server.AddCommands(rootCmd, app.DefaultNodeHome, newApp, appExport, addModuleInitFlags)
 
 	// add keybase, auxiliary RPC, query, genesis, and tx child commands
 	rootCmd.AddCommand(
-		rpc.StatusCommand(),
-		genesisCommand(encodingConfig),
+		server.StatusCommand(),
+		genesisCommand(encodingConfig.TxConfig, basicManager),
 		queryCommand(),
 		txCommand(),
-		keys.Commands(app.DefaultNodeHome),
+		keys.Commands(),
 	)
 
 	// add rosetta
@@ -220,8 +273,8 @@ func overwriteFlagDefaults(c *cobra.Command, defaults map[string]string) {
 
 // genesisCommand builds genesis-related `simd genesis` command.
 // Users may provide application specific commands as a parameter.
-func genesisCommand(encodingConfig config.EncodingConfig, cmds ...*cobra.Command) *cobra.Command {
-	cmd := genutilcli.GenesisCoreCommand(encodingConfig.TxConfig, app.ModuleBasics, app.DefaultNodeHome)
+func genesisCommand(txConfig client.TxConfig, basicManager module.BasicManager, cmds ...*cobra.Command) *cobra.Command {
+	cmd := genutilcli.GenesisCoreCommand(txConfig, basicManager, app.DefaultNodeHome)
 
 	for _, sub_cmd := range cmds { //nolint:revive,stylecheck // sdk code copy
 		cmd.AddCommand(sub_cmd)
@@ -240,14 +293,14 @@ func queryCommand() *cobra.Command {
 	}
 
 	cmd.AddCommand(
-		authcmd.GetAccountCmd(),
 		rpc.ValidatorCommand(),
-		rpc.BlockCommand(),
+		rpc.WaitTxCmd(),
+		server.QueryBlockCmd(),
 		authcmd.QueryTxsByEventsCmd(),
+		server.QueryBlocksCmd(),
 		authcmd.QueryTxCmd(),
+		server.QueryBlockResultsCmd(),
 	)
-
-	app.ModuleBasics.AddQueryCommands(cmd)
 
 	return cmd
 }
@@ -261,7 +314,6 @@ func txCommand() *cobra.Command {
 		RunE:                       client.ValidateCmd,
 	}
 
-	app.ModuleBasics.AddTxCommands(cmd)
 	addQueryGasPriceToAllLeafs(cmd)
 
 	cmd.AddCommand(
@@ -273,10 +325,8 @@ func txCommand() *cobra.Command {
 		authcmd.GetBroadcastCommand(),
 		authcmd.GetEncodeCommand(),
 		authcmd.GetDecodeCommand(),
-		authcmd.GetAuxToFeeCommand(),
+		authcmd.GetSimulateCmd(),
 	)
-
-	installAwaitBroadcastModeWrapper(cmd)
 
 	return cmd
 }
@@ -286,7 +336,7 @@ const broadcastModeBlock = "block"
 type txWriter struct {
 	cdc          codec.Codec
 	parentWriter io.Writer
-	txHash       string
+	txRes        *sdk.TxResponse
 }
 
 func (txw *txWriter) Write(p []byte) (int, error) {
@@ -302,7 +352,7 @@ func (txw *txWriter) Write(p []byte) (int, error) {
 	}
 
 	// Store the tx hash for further processing.
-	txw.txHash = res.TxHash
+	txw.txRes = res
 	return len(p), nil
 }
 
@@ -372,13 +422,19 @@ func installAwaitBroadcastModeWrapper(cmd *cobra.Command) {
 				return err
 			}
 
+			if writer.txRes.Code != 0 {
+				clientCtx.Output = originalOutput
+				clientCtx.OutputFormat = *originalOutputFormat
+				return errors.WithStack(clientCtx.PrintProto(writer.txRes))
+			}
+
 			// Once we read tx hash from the output produced by cosmos sdk we may await the transaction.
-			awaitClientCtx := coreumclient.NewContext(coreumclient.DefaultContextConfig(), app.ModuleBasics).
+			awaitClientCtx := coreumclient.NewContextFromCosmosContext(coreumclient.DefaultContextConfig(), clientCtx).
 				WithGRPCClient(clientCtx.GRPCClient).WithClient(clientCtx.Client)
 			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 			defer cancel()
 
-			res, err := coreumclient.AwaitTx(ctx, awaitClientCtx, writer.txHash)
+			res, err := coreumclient.AwaitTx(ctx, awaitClientCtx, writer.txRes.TxHash)
 			if err != nil {
 				return err
 			}
@@ -447,4 +503,14 @@ func appExport(
 	}
 
 	return coreumApp.ExportAppStateAndValidators(forZeroHeight, jailAllowedAddrs, modulesToExport)
+}
+
+func tempDir() string {
+	dir, err := os.MkdirTemp("", "cored")
+	if err != nil {
+		panic("failed to create temp dir: " + err.Error())
+	}
+	defer os.RemoveAll(dir) //nolint:errcheck // we don't care
+
+	return dir
 }

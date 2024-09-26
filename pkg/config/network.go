@@ -1,32 +1,21 @@
 package config
 
 import (
-	_ "embed"
+	"context"
 	"time"
 
 	sdkmath "cosmossdk.io/math"
+	cosmosclient "github.com/cosmos/cosmos-sdk/client"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/types/module"
+	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"github.com/pkg/errors"
 
 	"github.com/CoreumFoundation/coreum/v4/genesis"
 	"github.com/CoreumFoundation/coreum/v4/pkg/config/constant"
 )
 
-var (
-	// GenesisV1Template is the genesis template used by v1 version of the chain.
-	//go:embed genesis/genesis.v1.tmpl.json
-	GenesisV1Template string
-
-	// GenesisV2Template is the genesis template used by v2 version of the chain.
-	//go:embed genesis/genesis.v2.tmpl.json
-	GenesisV2Template string
-
-	// GenesisV3Template is the genesis template used by v3 version of the chain.
-	//go:embed genesis/genesis.v3.tmpl.json
-	GenesisV3Template string
-
-	networkConfigs map[constant.ChainID]NetworkConfig
-)
+var networkConfigs map[constant.ChainID]NetworkConfig
 
 func init() {
 	// configs
@@ -35,8 +24,8 @@ func init() {
 			Provider: NewStaticConfigProvider(genesis.MainnetGenesis),
 			NodeConfig: NodeConfig{
 				SeedPeers: []string{
-					"0df493af80fbaad41b9b26d6f4520b39ceb1d210@34.171.208.193:26656", // seed-iron
-					"cba16f4f32707d70a2a2d10861fac897f1e9aaa1@34.72.150.107:26656",  // seed-nickle
+					"0df493af80fbaad41b9b26d6f4520b39ceb1d210@seed-iron.mainnet-1.coreum.dev:26656",   // seed-iron
+					"cba16f4f32707d70a2a2d10861fac897f1e9aaa1@seed-nickle.mainnet-1.coreum.dev:26656", // seed-nickle
 				},
 			},
 		},
@@ -44,35 +33,37 @@ func init() {
 			Provider: NewStaticConfigProvider(genesis.TestnetGenesis),
 			NodeConfig: NodeConfig{
 				SeedPeers: []string{
-					"64391878009b8804d90fda13805e45041f492155@35.232.157.206:26656", // seed-sirius
-					"53f2367d8f8291af8e3b6ca60efded0675ff6314@34.29.15.170:26656",   // seed-antares
+					"64391878009b8804d90fda13805e45041f492155@seed-sirius.testnet-1.coreum.dev:26656",  // seed-sirius
+					"53f2367d8f8291af8e3b6ca60efded0675ff6314@seed-antares.testnet-1.coreum.dev:26656", // seed-antares
 				},
 			},
 		},
 		constant.ChainIDDev: {
 			Provider: DynamicConfigProvider{
-				GenesisTemplate: GenesisV3Template,
-				ChainID:         constant.ChainIDDev,
-				GenesisTime:     time.Date(2022, 6, 27, 12, 0, 0, 0, time.UTC),
-				BlockTimeIota:   time.Second,
-				Denom:           constant.DenomDev,
-				AddressPrefix:   constant.AddressPrefixDev,
-				GovConfig: GovConfig{
-					ProposalConfig: GovProposalConfig{
-						MinDepositAmount: "4000000000", // 4,000 CORE
-						VotingPeriod:     "4h",         // 4 hours
+				GenesisInitConfig: GenesisInitConfig{
+					ChainID:       constant.ChainIDDev,
+					GenesisTime:   time.Date(2022, 6, 27, 12, 0, 0, 0, time.UTC),
+					Denom:         constant.DenomDev,
+					AddressPrefix: constant.AddressPrefixDev,
+					GovConfig: GenesisInitGovConfig{
+						MinDeposit: sdk.NewCoins(
+							sdk.NewCoin(constant.DenomDev, sdkmath.NewIntWithDecimal(4, 9)),
+						), // 4,000 CORE
+						ExpeditedMinDeposit: sdk.NewCoins(
+							sdk.NewCoin(constant.DenomDev, sdkmath.NewIntWithDecimal(4, 9)),
+						), // 4,000 CORE
+						VotingPeriod:          4 * time.Hour,
+						ExpeditedVotingPeriod: 1 * time.Hour,
 					},
-				},
-				CustomParamsConfig: CustomParamsConfig{
-					Staking: CustomParamsStakingConfig{
+					CustomParamsConfig: GenesisInitCustomParamsConfig{
 						MinSelfDelegation: sdkmath.NewInt(20_000_000_000), // 20k core
 					},
-				},
-				FundedAccounts: []FundedAccount{
-					// Faucet's account
-					{
-						Address:  "devcore1ckuncyw0hftdq5qfjs6ee2v6z73sq0urd390cd",
-						Balances: sdk.NewCoins(sdk.NewCoin(constant.DenomDev, sdkmath.NewInt(100_000_000_000_000))), // 100m faucet
+					BankBalances: []banktypes.Balance{
+						// Faucet's account
+						{
+							Address: "devcore1ckuncyw0hftdq5qfjs6ee2v6z73sq0urd390cd",
+							Coins:   sdk.NewCoins(sdk.NewCoin(constant.DenomDev, sdkmath.NewInt(100_000_000_000_000))), // 100m faucet,
+						},
 					},
 				},
 			},
@@ -91,8 +82,14 @@ type GovProposalConfig struct {
 	// MinDepositAmount is the minimum amount needed to create a proposal. Basically anti-spam policy.
 	MinDepositAmount string
 
+	// ExpeditedMinDepositAmount is the minimum amount needed to create an expedited proposal.
+	ExpeditedMinDepositAmount string
+
 	// VotingPeriod is the proposal voting period duration.
 	VotingPeriod string
+
+	// ExpeditedVotingPeriod is the expedited proposal voting period duration.
+	ExpeditedVotingPeriod string
 }
 
 // CustomParamsStakingConfig contains custom params for the staking module configuration.
@@ -152,8 +149,10 @@ func (c NetworkConfig) ChainID() constant.ChainID {
 }
 
 // EncodeGenesis returns the json encoded representation of the genesis file.
-func (c NetworkConfig) EncodeGenesis() ([]byte, error) {
-	return c.Provider.EncodeGenesis()
+func (c NetworkConfig) EncodeGenesis(
+	ctx context.Context, cosmosClientCtx cosmosclient.Context, basicManager module.BasicManager,
+) ([]byte, error) {
+	return c.Provider.EncodeGenesis(ctx, cosmosClientCtx, basicManager)
 }
 
 // NetworkConfigByChainID returns predefined NetworkConfig for a ChainID.
@@ -166,4 +165,14 @@ func NetworkConfigByChainID(id constant.ChainID) (NetworkConfig, error) {
 	nc.NodeConfig = nc.NodeConfig.clone()
 
 	return nc, nil
+}
+
+// ValPrefixFromAddressPrefix returns validator operator prefix.
+func ValPrefixFromAddressPrefix(addressPrefix string) string {
+	return addressPrefix + "valoper"
+}
+
+// ConsPrefixFromAddressPrefix returns consensus prefix.
+func ConsPrefixFromAddressPrefix(addressPrefix string) string {
+	return addressPrefix + "valcons"
 }

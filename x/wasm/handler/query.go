@@ -5,10 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 
+	sdkmath "cosmossdk.io/math"
+	nfttypes "cosmossdk.io/x/nft"
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	nfttypes "github.com/cosmos/cosmos-sdk/x/nft"
 	"github.com/cosmos/gogoproto/proto"
 	"github.com/pkg/errors"
 
@@ -43,7 +44,7 @@ type assetNFTClass struct {
 	URIHash     string                       `json:"uri_hash"`
 	Data        string                       `json:"data"`
 	Features    []assetnfttypes.ClassFeature `json:"features"`
-	RoyaltyRate sdk.Dec                      `json:"royalty_rate"`
+	RoyaltyRate sdkmath.LegacyDec            `json:"royalty_rate"`
 }
 
 // assetNFTClassResponse is the asset nft Class response with string data.
@@ -316,7 +317,7 @@ func processAssetNFTQuery(
 
 				var dataString string
 				if classRes.Class.Data != nil {
-					dataString, err = unmarshalDataBytes(classRes.Class.Data)
+					dataString, err = unmarshalData(classRes.Class.Data)
 					if err != nil {
 						return nil, err
 					}
@@ -355,7 +356,7 @@ func processAssetNFTQuery(
 				for i := 0; i < len(classesRes.Classes); i++ {
 					var dataString string
 					if classesRes.Classes[i].Data != nil {
-						dataString, err = unmarshalDataBytes(classesRes.Classes[i].Data)
+						dataString, err = unmarshalData(classesRes.Classes[i].Data)
 						if err != nil {
 							return nil, err
 						}
@@ -512,7 +513,7 @@ func processNFTQuery(ctx sdk.Context, nftQuery *nftQuery, nftQueryServer nfttype
 
 				var dataString string
 				if nftRes.Nft.Data != nil {
-					dataString, err = unmarshalDataBytes(nftRes.Nft.Data)
+					dataString, err = unmarshalData(nftRes.Nft.Data)
 					if err != nil {
 						return nil, err
 					}
@@ -550,7 +551,7 @@ func processNFTQuery(ctx sdk.Context, nftQuery *nftQuery, nftQueryServer nfttype
 				for i := 0; i < len(nftsRes.Nfts); i++ {
 					var dataString string
 					if nftsRes.Nfts[i].Data != nil {
-						dataString, err = unmarshalDataBytes(nftsRes.Nfts[i].Data)
+						dataString, err = unmarshalData(nftsRes.Nfts[i].Data)
 						if err != nil {
 							return nil, err
 						}
@@ -583,7 +584,7 @@ func processNFTQuery(ctx sdk.Context, nftQuery *nftQuery, nftQueryServer nfttype
 
 				var dataString string
 				if nftClassRes.Class.Data != nil {
-					dataString, err = unmarshalDataBytes(nftClassRes.Class.Data)
+					dataString, err = unmarshalData(nftClassRes.Class.Data)
 					if err != nil {
 						return nil, err
 					}
@@ -624,7 +625,7 @@ func processNFTQuery(ctx sdk.Context, nftQuery *nftQuery, nftQueryServer nfttype
 				for i := 0; i < len(nftClassesRes.Classes); i++ {
 					var dataString string
 					if nftClassesRes.Classes[i].Data != nil {
-						dataString, err = unmarshalDataBytes(nftClassesRes.Classes[i].Data)
+						dataString, err = unmarshalData(nftClassesRes.Classes[i].Data)
 						if err != nil {
 							return nil, err
 						}
@@ -653,7 +654,7 @@ func executeQuery[T, K any](
 	reqStruct T,
 	reqExecutor func(ctx context.Context, req T) (K, error),
 ) (json.RawMessage, error) {
-	res, err := reqExecutor(sdk.WrapSDKContext(ctx), reqStruct)
+	res, err := reqExecutor(ctx, reqStruct)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -665,12 +666,27 @@ func executeQuery[T, K any](
 	return raw, nil
 }
 
-func unmarshalDataBytes(data *codectypes.Any) (string, error) {
-	var dataBytes assetnfttypes.DataBytes
-	err := proto.Unmarshal(data.Value, &dataBytes)
-	if err != nil {
-		return "", errors.WithStack(err)
+func unmarshalData(data *codectypes.Any) (string, error) {
+	switch data.TypeUrl {
+	case "/" + proto.MessageName((*assetnfttypes.DataBytes)(nil)):
+		var datab assetnfttypes.DataBytes
+		err := proto.Unmarshal(data.Value, &datab)
+		if err != nil {
+			return "", errors.WithStack(err)
+		}
+		return base64.StdEncoding.EncodeToString(datab.Data), nil
+	case "/" + proto.MessageName((*assetnfttypes.DataDynamic)(nil)):
+		var datadynamic assetnfttypes.DataDynamic
+		err := proto.Unmarshal(data.Value, &datadynamic)
+		if err != nil {
+			return "", errors.WithStack(err)
+		}
+		bytes, err := datadynamic.Marshal()
+		if err != nil {
+			return "", errors.WithStack(err)
+		}
+		return base64.StdEncoding.EncodeToString(bytes), nil
+	default:
+		return "", errors.Errorf("unsupported data type %s", data.TypeUrl)
 	}
-
-	return base64.StdEncoding.EncodeToString(dataBytes.Data), nil
 }

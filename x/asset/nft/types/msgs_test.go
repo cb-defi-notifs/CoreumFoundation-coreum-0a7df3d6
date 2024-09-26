@@ -2,13 +2,16 @@ package types_test
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
 	sdkerrors "cosmossdk.io/errors"
+	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
+	"github.com/cosmos/cosmos-sdk/crypto/keys/ed25519"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
-	"github.com/cosmos/cosmos-sdk/x/auth/migrations/legacytx"
 	"github.com/cosmos/gogoproto/proto"
 	"github.com/stretchr/testify/require"
 
@@ -53,25 +56,14 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 		expectedError error
 	}{
 		{
-			name: "valid msg",
+			name: "valid_msg",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				return &msg
 			},
 		},
 		{
-			name: "valid msg with max data size",
-			messageFunc: func() *types.MsgIssueClass {
-				msg := validMessage
-				msg.Data = &codectypes.Any{
-					TypeUrl: "/" + proto.MessageName((*types.DataBytes)(nil)),
-					Value:   bytes.Repeat([]byte{0x01}, types.MaxDataSize),
-				}
-				return &msg
-			},
-		},
-		{
-			name: "valid msg with nil data",
+			name: "valid_msg_with_nil_data",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				msg.Data = nil
@@ -79,7 +71,7 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid issuer",
+			name: "invalid_issuer",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				msg.Issuer = "devcore172rc5sz2uc"
@@ -88,7 +80,7 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 			expectedError: cosmoserrors.ErrInvalidAddress,
 		},
 		{
-			name: "invalid name",
+			name: "invalid_name",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				msg.Name = strings.Repeat("x", 129)
@@ -97,7 +89,7 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid empty symbol",
+			name: "invalid_empty_symbol",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				msg.Symbol = ""
@@ -106,7 +98,7 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid char symbol",
+			name: "invalid_char_symbol",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				msg.Symbol = "#x#"
@@ -115,7 +107,7 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid description",
+			name: "invalid_description",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				msg.Description = string(make([]byte, 257))
@@ -124,7 +116,7 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid uri",
+			name: "invalid_uri",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				msg.URI = string(make([]byte, 257))
@@ -133,7 +125,7 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid uri hash",
+			name: "invalid_uri_hash",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				msg.URIHash = strings.Repeat("x", 129)
@@ -142,21 +134,9 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid data - too long",
+			name: "invalid_data_wrong_type",
 			messageFunc: func() *types.MsgIssueClass {
-				msg := validMessage
-				msg.Data = &codectypes.Any{
-					TypeUrl: "/" + proto.MessageName((*types.DataBytes)(nil)),
-					Value:   bytes.Repeat([]byte{0x01}, types.MaxDataSize+1),
-				}
-				return &msg
-			},
-			expectedError: types.ErrInvalidInput,
-		},
-		{
-			name: "invalid data - wrong type",
-			messageFunc: func() *types.MsgIssueClass {
-				dataValue, err := codectypes.NewAnyWithValue(&types.MsgIssueClass{})
+				dataValue, err := codectypes.NewAnyWithValue(&types.DataDynamic{})
 				requireT.NoError(err)
 				msg := validMessage
 				msg.Data = dataValue
@@ -165,7 +145,7 @@ func TestMsgIssueClass_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid duplicated class feature",
+			name: "invalid_duplicated_class_feature",
 			messageFunc: func() *types.MsgIssueClass {
 				msg := validMessage
 				msg.Features = []types.ClassFeature{
@@ -214,25 +194,14 @@ func TestMsgMint_ValidateBasic(t *testing.T) {
 		expectedError error
 	}{
 		{
-			name: "valid msg",
+			name: "valid_msg",
 			messageFunc: func() *types.MsgMint {
 				msg := validMessage
 				return &msg
 			},
 		},
 		{
-			name: "valid msg with max data size",
-			messageFunc: func() *types.MsgMint {
-				msg := validMessage
-				msg.Data = &codectypes.Any{
-					TypeUrl: "/" + proto.MessageName((*types.DataBytes)(nil)),
-					Value:   bytes.Repeat([]byte{0x01}, types.MaxDataSize),
-				}
-				return &msg
-			},
-		},
-		{
-			name: "valid msg with nil data",
+			name: "valid_msg_with_nil_data",
 			messageFunc: func() *types.MsgMint {
 				msg := validMessage
 				msg.Data = nil
@@ -240,7 +209,7 @@ func TestMsgMint_ValidateBasic(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid id",
+			name: "invalid_id",
 			messageFunc: func() *types.MsgMint {
 				msg := validMessage
 				msg.ID = invalidNFTID
@@ -249,7 +218,7 @@ func TestMsgMint_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid sender",
+			name: "invalid_sender",
 			messageFunc: func() *types.MsgMint {
 				msg := validMessage
 				msg.Sender = invalidAccount
@@ -258,7 +227,7 @@ func TestMsgMint_ValidateBasic(t *testing.T) {
 			expectedError: cosmoserrors.ErrInvalidAddress,
 		},
 		{
-			name: "invalid classID",
+			name: "invalid_classID",
 			messageFunc: func() *types.MsgMint {
 				msg := validMessage
 				msg.ClassID = "x"
@@ -267,7 +236,7 @@ func TestMsgMint_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid uri",
+			name: "invalid_uri",
 			messageFunc: func() *types.MsgMint {
 				msg := validMessage
 				msg.URI = string(make([]byte, 257))
@@ -276,7 +245,7 @@ func TestMsgMint_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid uri hash",
+			name: "invalid_uri_hash",
 			messageFunc: func() *types.MsgMint {
 				msg := validMessage
 				msg.URIHash = strings.Repeat("x", 129)
@@ -285,24 +254,228 @@ func TestMsgMint_ValidateBasic(t *testing.T) {
 			expectedError: types.ErrInvalidInput,
 		},
 		{
-			name: "invalid data - too long",
-			messageFunc: func() *types.MsgMint {
-				msg := validMessage
-				msg.Data = &codectypes.Any{
-					TypeUrl: "/" + proto.MessageName((*types.DataBytes)(nil)),
-					Value:   bytes.Repeat([]byte{0x01}, types.MaxDataSize+1),
-				}
-				return &msg
-			},
-			expectedError: types.ErrInvalidInput,
-		},
-		{
-			name: "invalid data - wrong type",
+			name: "invalid_data_wrong_type",
 			messageFunc: func() *types.MsgMint {
 				dataValue, err := codectypes.NewAnyWithValue(&types.MsgIssueClass{})
 				requireT.NoError(err)
 				msg := validMessage
 				msg.Data = dataValue
+				return &msg
+			},
+			expectedError: types.ErrInvalidInput,
+		},
+		{
+			name: "valid_msg_with_dynamic_data",
+			messageFunc: func() *types.MsgMint {
+				msg := validMessage
+				msg.Data = func() *codectypes.Any {
+					dataDynamic := types.DataDynamic{
+						Items: []types.DataDynamicItem{
+							{
+								// no editors
+								Editors: []types.DataEditor{},
+								Data:    bytes.Repeat([]byte{0x01}, 5),
+							},
+							{
+								// admin
+								Editors: []types.DataEditor{
+									types.DataEditor_admin,
+								},
+								Data: nil,
+							},
+							{
+								// owner
+								Editors: []types.DataEditor{
+									types.DataEditor_admin,
+								},
+								Data: bytes.Repeat([]byte{0x01}, 5),
+							},
+							{
+								// admin and owner
+								Editors: []types.DataEditor{
+									types.DataEditor_admin,
+									types.DataEditor_owner,
+								},
+								Data: bytes.Repeat([]byte{0x01}, 5),
+							},
+						},
+					}
+
+					dataBytes, err := dataDynamic.Marshal()
+					requireT.NoError(err)
+
+					return &codectypes.Any{
+						TypeUrl: "/" + proto.MessageName((*types.DataDynamic)(nil)),
+						Value:   dataBytes,
+					}
+				}()
+				return &msg
+			},
+		},
+		{
+			name: "invalid_valid_msg_empty_item",
+			messageFunc: func() *types.MsgMint {
+				msg := validMessage
+				msg.Data = func() *codectypes.Any {
+					dataDynamic := types.DataDynamic{}
+					dataBytes, err := dataDynamic.Marshal()
+					requireT.NoError(err)
+					return &codectypes.Any{
+						TypeUrl: "/" + proto.MessageName((*types.DataDynamic)(nil)),
+						Value:   dataBytes,
+					}
+				}()
+				return &msg
+			},
+			expectedError: types.ErrInvalidInput,
+		},
+		{
+			name: "invalid_msg_duplicated_editor",
+			messageFunc: func() *types.MsgMint {
+				msg := validMessage
+				msg.Data = func() *codectypes.Any {
+					dataDynamic := types.DataDynamic{
+						Items: []types.DataDynamicItem{
+							{
+								Editors: []types.DataEditor{
+									types.DataEditor_admin, types.DataEditor_admin,
+								},
+								Data: nil,
+							},
+						},
+					}
+					dataBytes, err := dataDynamic.Marshal()
+					requireT.NoError(err)
+					return &codectypes.Any{
+						TypeUrl: "/" + proto.MessageName((*types.DataDynamic)(nil)),
+						Value:   dataBytes,
+					}
+				}()
+				return &msg
+			},
+			expectedError: types.ErrInvalidInput,
+		},
+		{
+			name: "invalid_msg_not_existing_editor",
+			messageFunc: func() *types.MsgMint {
+				msg := validMessage
+				msg.Data = func() *codectypes.Any {
+					dataDynamic := types.DataDynamic{
+						Items: []types.DataDynamicItem{
+							{
+								Editors: []types.DataEditor{
+									types.DataEditor(12),
+								},
+								Data: nil,
+							},
+						},
+					}
+					dataBytes, err := dataDynamic.Marshal()
+					requireT.NoError(err)
+					return &codectypes.Any{
+						TypeUrl: "/" + proto.MessageName((*types.DataDynamic)(nil)),
+						Value:   dataBytes,
+					}
+				}()
+				return &msg
+			},
+			expectedError: types.ErrInvalidInput,
+		},
+	}
+
+	for _, testCase := range testCases {
+		tc := testCase
+		t.Run(tc.name, func(t *testing.T) {
+			requireT := require.New(t)
+			err := tc.messageFunc().ValidateBasic()
+			if tc.expectedError == nil {
+				requireT.NoError(err)
+			} else {
+				requireT.True(sdkerrors.IsOf(err, tc.expectedError))
+			}
+		})
+	}
+}
+
+func TestMsgUpdateData_ValidateBasic(t *testing.T) {
+	sender := sdk.AccAddress(ed25519.GenPrivKey().PubKey().Address())
+	validMessage := types.MsgUpdateData{
+		Sender:  sender.String(),
+		ClassID: fmt.Sprintf("symbol-%s", sender.String()),
+		ID:      "my-id",
+		Items: []types.DataDynamicIndexedItem{
+			{
+				Index: 0,
+				Data:  nil,
+			},
+			{
+				Index: 1,
+				Data:  nil,
+			},
+		},
+	}
+	testCases := []struct {
+		name          string
+		messageFunc   func() *types.MsgUpdateData
+		expectedError error
+	}{
+		{
+			name: "valid_msg",
+			messageFunc: func() *types.MsgUpdateData {
+				msg := validMessage
+				return &msg
+			},
+		},
+		{
+			name: "invalid_id",
+			messageFunc: func() *types.MsgUpdateData {
+				msg := validMessage
+				msg.ID = invalidNFTID
+				return &msg
+			},
+			expectedError: types.ErrInvalidInput,
+		},
+		{
+			name: "invalid_sender",
+			messageFunc: func() *types.MsgUpdateData {
+				msg := validMessage
+				msg.Sender = invalidAccount
+				return &msg
+			},
+			expectedError: cosmoserrors.ErrInvalidAddress,
+		},
+		{
+			name: "invalid_classID",
+			messageFunc: func() *types.MsgUpdateData {
+				msg := validMessage
+				msg.ClassID = "x"
+				return &msg
+			},
+			expectedError: types.ErrInvalidInput,
+		},
+		{
+			name: "invalid_empty_items",
+			messageFunc: func() *types.MsgUpdateData {
+				msg := validMessage
+				msg.Items = nil
+				return &msg
+			},
+			expectedError: types.ErrInvalidInput,
+		},
+		{
+			name: "invalid_duplicated_index",
+			messageFunc: func() *types.MsgUpdateData {
+				msg := validMessage
+				msg.Items = []types.DataDynamicIndexedItem{
+					{
+						Index: 0,
+						Data:  nil,
+					},
+					{
+						Index: 0,
+						Data:  nil,
+					},
+				}
 				return &msg
 			},
 			expectedError: types.ErrInvalidInput,
@@ -654,11 +827,11 @@ func TestAmino(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		msg           legacytx.LegacyMsg
+		msg           sdk.Msg
 		wantAminoJSON string
 	}{
 		{
-			name: types.TypeMsgIssueClass,
+			name: sdk.MsgTypeURL(&types.MsgIssueClass{}),
 			msg: &types.MsgIssueClass{
 				Issuer: address,
 				Symbol: "ABC",
@@ -666,7 +839,7 @@ func TestAmino(t *testing.T) {
 			wantAminoJSON: `{"type":"assetnft/MsgIssueClass","value":{"issuer":"devcore172rc5sz2uclpsy3vvx3y79ah5dk450z5ruq2r5","royalty_rate":"0","symbol":"ABC"}}`,
 		},
 		{
-			name: types.TypeMsgMint,
+			name: sdk.MsgTypeURL(&types.MsgMint{}),
 			msg: &types.MsgMint{
 				Sender:  address,
 				ClassID: "classID",
@@ -674,7 +847,7 @@ func TestAmino(t *testing.T) {
 			wantAminoJSON: `{"type":"assetnft/MsgMint","value":{"class_id":"classID","sender":"devcore172rc5sz2uclpsy3vvx3y79ah5dk450z5ruq2r5"}}`,
 		},
 		{
-			name: types.TypeMsgBurn,
+			name: sdk.MsgTypeURL(&types.MsgBurn{}),
 			msg: &types.MsgBurn{
 				Sender:  address,
 				ClassID: "classID",
@@ -683,7 +856,7 @@ func TestAmino(t *testing.T) {
 			wantAminoJSON: `{"type":"assetnft/MsgBurn","value":{"class_id":"classID","id":"nftID","sender":"devcore172rc5sz2uclpsy3vvx3y79ah5dk450z5ruq2r5"}}`,
 		},
 		{
-			name: types.TypeMsgFreeze,
+			name: sdk.MsgTypeURL(&types.MsgFreeze{}),
 			msg: &types.MsgFreeze{
 				Sender:  address,
 				ClassID: "classID",
@@ -692,7 +865,7 @@ func TestAmino(t *testing.T) {
 			wantAminoJSON: `{"type":"assetnft/MsgFreeze","value":{"class_id":"classID","id":"nftID","sender":"devcore172rc5sz2uclpsy3vvx3y79ah5dk450z5ruq2r5"}}`,
 		},
 		{
-			name: types.TypeMsgUnfreeze,
+			name: sdk.MsgTypeURL(&types.MsgUnfreeze{}),
 			msg: &types.MsgUnfreeze{
 				Sender:  address,
 				ClassID: "classID",
@@ -701,7 +874,7 @@ func TestAmino(t *testing.T) {
 			wantAminoJSON: `{"type":"assetnft/MsgUnfreeze","value":{"class_id":"classID","id":"nftID","sender":"devcore172rc5sz2uclpsy3vvx3y79ah5dk450z5ruq2r5"}}`,
 		},
 		{
-			name: types.TypeMsgAddToWhitelist,
+			name: sdk.MsgTypeURL(&types.MsgAddToWhitelist{}),
 			msg: &types.MsgAddToWhitelist{
 				Sender:  address,
 				ClassID: "classID",
@@ -710,7 +883,7 @@ func TestAmino(t *testing.T) {
 			wantAminoJSON: `{"type":"assetnft/MsgAddToWhitelist","value":{"class_id":"classID","id":"nftID","sender":"devcore172rc5sz2uclpsy3vvx3y79ah5dk450z5ruq2r5"}}`,
 		},
 		{
-			name: types.TypeMsgRemoveFromWhitelist,
+			name: sdk.MsgTypeURL(&types.MsgRemoveFromWhitelist{}),
 			msg: &types.MsgRemoveFromWhitelist{
 				Sender:  address,
 				ClassID: "classID",
@@ -719,10 +892,14 @@ func TestAmino(t *testing.T) {
 			wantAminoJSON: `{"type":"assetnft/MsgRemoveFromWhitelist","value":{"class_id":"classID","id":"nftID","sender":"devcore172rc5sz2uclpsy3vvx3y79ah5dk450z5ruq2r5"}}`,
 		},
 	}
+
+	legacyAmino := codec.NewLegacyAmino()
+	types.RegisterLegacyAminoCodec(legacyAmino)
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.wantAminoJSON, string(tt.msg.GetSignBytes()))
+			generatedJSON := legacyAmino.Amino.MustMarshalJSON(tt.msg)
+			require.Equal(t, tt.wantAminoJSON, string(sdk.MustSortJSON(generatedJSON)))
 		})
 	}
 }

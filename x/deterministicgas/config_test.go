@@ -1,21 +1,30 @@
 package deterministicgas_test
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
+	"time"
 	_ "unsafe"
 
+	msgv1 "cosmossdk.io/api/cosmos/msg/v1"
 	sdkmath "cosmossdk.io/math"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
+	"github.com/cometbft/cometbft/crypto/ed25519"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
+	protobuf "github.com/golang/protobuf/proto" //nolint:staticcheck // We need this dependency to convert protos to be able to read their options
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/CoreumFoundation/coreum/v4/testutil/simapp"
 	assetfttypes "github.com/CoreumFoundation/coreum/v4/x/asset/ft/types"
+	assetnfttypes "github.com/CoreumFoundation/coreum/v4/x/asset/nft/types"
 	"github.com/CoreumFoundation/coreum/v4/x/deterministicgas"
+	"github.com/CoreumFoundation/coreum/v4/x/deterministicgas/types"
 )
 
 // To access private variable from github.com/cosmos/gogoproto we link it to local variable.
@@ -41,120 +50,7 @@ func TestDeterministicGas_DeterministicMessages(t *testing.T) {
 		"/testpb.TestMsg",
 		"/testpb.MsgCreateDog",
 		"/cosmos.tx.v1beta1.Tx",
-	}
-
-	// WASM messages will be added here
-	nondeterministicMsgURLs := []deterministicgas.MsgURL{
-		// asset ft
-		"/coreum.asset.ft.v1.MsgUpdateParams",
-
-		// asset nft
-		"/coreum.asset.nft.v1.MsgUpdateParams",
-
-		// feemodel
-		"/coreum.feemodel.v1.MsgUpdateParams",
-
-		// customparams
-		"/coreum.customparams.v1.MsgUpdateStakingParams",
-
-		// auth
-		"/cosmos.auth.v1beta1.MsgUpdateParams",
-
-		// bank
-		"/cosmos.bank.v1beta1.MsgSetSendEnabled",
-		"/cosmos.bank.v1beta1.MsgUpdateParams",
-
-		// distribution
-		"/cosmos.distribution.v1beta1.MsgUpdateParams",
-		"/cosmos.distribution.v1beta1.MsgCommunityPoolSpend",
-
-		// consensus
-		"/cosmos.consensus.v1.MsgUpdateParams",
-
-		// crisis
-		"/cosmos.crisis.v1beta1.MsgUpdateParams",
-
-		// crisis
-		"/cosmos.crisis.v1beta1.MsgVerifyInvariant",
-
-		// evidence
-		"/cosmos.evidence.v1beta1.MsgSubmitEvidence",
-
-		// gov
-		"/cosmos.gov.v1beta1.MsgSubmitProposal",
-
-		"/cosmos.gov.v1.MsgSubmitProposal",
-		"/cosmos.gov.v1.MsgExecLegacyContent",
-		"/cosmos.gov.v1.MsgUpdateParams",
-
-		"/cosmos.gov.v1.MsgSubmitProposal",
-		"/cosmos.gov.v1.MsgExecLegacyContent",
-		"/cosmos.gov.v1.MsgUpdateParams",
-
-		// group
-		"/cosmos.group.v1.MsgSubmitProposal",
-		"/cosmos.group.v1.MsgVote",
-		"/cosmos.group.v1.MsgExec",
-
-		// mint
-		"/cosmos.mint.v1beta1.MsgUpdateParams",
-
-		// staking
-		"/cosmos.staking.v1beta1.MsgUpdateParams",
-
-		// slashing
-		"/cosmos.slashing.v1beta1.MsgUpdateParams",
-
-		// upgrade
-		"/cosmos.upgrade.v1beta1.MsgCancelUpgrade",
-		"/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade",
-
-		// wasm
-		"/cosmwasm.wasm.v1.MsgStoreCode",
-		"/cosmwasm.wasm.v1.MsgInstantiateContract",
-		"/cosmwasm.wasm.v1.MsgInstantiateContract2",
-		"/cosmwasm.wasm.v1.MsgExecuteContract",
-		"/cosmwasm.wasm.v1.MsgMigrateContract",
-		"/cosmwasm.wasm.v1.MsgIBCCloseChannel",
-		"/cosmwasm.wasm.v1.MsgIBCSend",
-		"/cosmwasm.wasm.v1.MsgUpdateInstantiateConfig",
-		"/cosmwasm.wasm.v1.MsgUpdateParams",
-		"/cosmwasm.wasm.v1.MsgUnpinCodes",
-		"/cosmwasm.wasm.v1.MsgPinCodes",
-		"/cosmwasm.wasm.v1.MsgSudoContract",
-		"/cosmwasm.wasm.v1.MsgStoreAndInstantiateContract",
-		"/cosmwasm.wasm.v1.MsgRemoveCodeUploadParamsAddresses",
-		"/cosmwasm.wasm.v1.MsgAddCodeUploadParamsAddresses",
-		"/cosmwasm.wasm.v1.MsgStoreAndMigrateContract",
-		"/cosmwasm.wasm.v1.MsgUpdateContractLabel",
-
-		// ibc/applications/interchain_accounts
-		"/ibc.applications.interchain_accounts.controller.v1.MsgRegisterInterchainAccount",
-		"/ibc.applications.interchain_accounts.controller.v1.MsgSendTx",
-
-		// ibc/core/client
-		"/ibc.core.client.v1.MsgCreateClient",
-		"/ibc.core.client.v1.MsgUpdateClient",
-		"/ibc.core.client.v1.MsgUpgradeClient",
-		"/ibc.core.client.v1.MsgSubmitMisbehaviour",
-
-		// ibc/core/connection
-		"/ibc.core.connection.v1.MsgConnectionOpenInit",
-		"/ibc.core.connection.v1.MsgConnectionOpenTry",
-		"/ibc.core.connection.v1.MsgConnectionOpenAck",
-		"/ibc.core.connection.v1.MsgConnectionOpenConfirm",
-
-		// ibc/core/channel
-		"/ibc.core.channel.v1.MsgChannelOpenInit",
-		"/ibc.core.channel.v1.MsgChannelOpenTry",
-		"/ibc.core.channel.v1.MsgChannelOpenAck",
-		"/ibc.core.channel.v1.MsgChannelOpenConfirm",
-		"/ibc.core.channel.v1.MsgChannelCloseInit",
-		"/ibc.core.channel.v1.MsgChannelCloseConfirm",
-		"/ibc.core.channel.v1.MsgRecvPacket",
-		"/ibc.core.channel.v1.MsgTimeout",
-		"/ibc.core.channel.v1.MsgTimeoutOnClose",
-		"/ibc.core.channel.v1.MsgAcknowledgement",
+		"/cosmos.bank.v1beta1.Input",
 	}
 
 	// This is required to compile all the messages used by the app, not only those included in deterministic gas config
@@ -162,56 +58,59 @@ func TestDeterministicGas_DeterministicMessages(t *testing.T) {
 
 	cfg := deterministicgas.DefaultConfig()
 
-	var deterministicMsgs []sdk.Msg
-	var nondeterministicMsgs []sdk.Msg
+	deterministicMsgCount := 0
+	nondeterministicMsgCount := 0
+	extensionMsgCount := 0
+	nonExtensionMsgCount := 0
 	for protoType := range revProtoTypes {
 		sdkMsg, ok := reflect.New(protoType.Elem()).Interface().(sdk.Msg)
 		if !ok {
 			continue
 		}
 
-		// Skip unknown messages.
+		options := protobuf.MessageV2(reflect.New(protoType.Elem()).Interface()).ProtoReflect().Descriptor().Options()
+
+		signersFields := proto.GetExtension(options, msgv1.E_Signer).([]string)
+		if len(signersFields) == 0 {
+			continue
+		}
+
+		// skip some messages which don't have the message handlers
 		if lo.ContainsBy(ignoredMsgURLs, func(msgURL deterministicgas.MsgURL) bool {
 			return deterministicgas.MsgToMsgURL(sdkMsg) == msgURL
 		}) {
 			continue
 		}
 
-		// Add message to nondeterministic.
-		if lo.ContainsBy(nondeterministicMsgURLs, func(msgURL deterministicgas.MsgURL) bool {
-			return deterministicgas.MsgToMsgURL(sdkMsg) == msgURL
-		}) {
-			nondeterministicMsgs = append(nondeterministicMsgs, sdkMsg)
-			continue
+		msgURL := deterministicgas.MsgToMsgURL(sdkMsg)
+		gasFunc, ok := cfg.GasByMessageMap()[msgURL]
+		assert.True(t, ok, fmt.Sprintf("sdk.Msg %s, not found in the gasByMsg map", msgURL))
+
+		_, _, nonExtensionMsg, err := types.TypeAssertMessages(sdkMsg)
+		require.NoError(t, err)
+		if nonExtensionMsg {
+			nonExtensionMsgCount++
+		} else {
+			extensionMsgCount++
 		}
 
-		// Add message to deterministic.
-		deterministicMsgs = append(deterministicMsgs, sdkMsg)
+		gas, ok := gasFunc(sdkMsg)
+		if ok {
+			assert.NotZero(t, gas)
+			deterministicMsgCount++
+			continue
+		}
+		assert.Zero(t, gas)
+		nondeterministicMsgCount++
 	}
 
-	// To make sure we do not increase/decrease deterministic types accidentally
+	// To make sure we do not increase/decrease deterministic and extension types accidentally,
 	// we assert length to be equal to exact number, so each change requires
 	// explicit adjustment of tests.
-	assert.Len(t, nondeterministicMsgs, 62)
-	assert.Len(t, deterministicMsgs, 64)
-
-	for _, sdkMsg := range deterministicMsgs {
-		sdkMsg := sdkMsg
-		t.Run("deterministic: "+string(deterministicgas.MsgToMsgURL(sdkMsg)), func(t *testing.T) {
-			gas, ok := cfg.GasRequiredByMessage(sdkMsg)
-			assert.True(t, ok)
-			assert.Positive(t, gas)
-		})
-	}
-
-	for _, sdkMsg := range nondeterministicMsgs {
-		sdkMsg := sdkMsg
-		t.Run("nondeterministic: "+string(deterministicgas.MsgToMsgURL(sdkMsg)), func(t *testing.T) {
-			gas, ok := cfg.GasRequiredByMessage(sdkMsg)
-			assert.False(t, ok)
-			assert.Zero(t, gas)
-		})
-	}
+	assert.Equal(t, 82, nondeterministicMsgCount)
+	assert.Equal(t, 71, deterministicMsgCount)
+	assert.Equal(t, 14, extensionMsgCount)
+	assert.Equal(t, 139, nonExtensionMsgCount)
 }
 
 func TestDeterministicGas_GasRequiredByMessage(t *testing.T) {
@@ -222,7 +121,6 @@ func TestDeterministicGas_GasRequiredByMessage(t *testing.T) {
 		assetFTIssue                 = 70000
 		bankSendPerCoinGas           = deterministicgas.BankSendPerCoinGas
 		bankMultiSendPerOperationGas = deterministicgas.BankMultiSendPerOperationsGas
-		authzMsgExecOverhead         = deterministicgas.AuthzExecOverhead
 	)
 
 	cfg := deterministicgas.DefaultConfig()
@@ -253,7 +151,7 @@ func TestDeterministicGas_GasRequiredByMessage(t *testing.T) {
 		},
 		{
 			name:                    "bank.MsgSend: 1 entry",
-			msg:                     &banktypes.MsgSend{Amount: sdk.NewCoins(sdk.NewCoin(denom, sdk.OneInt()))},
+			msg:                     &banktypes.MsgSend{Amount: sdk.NewCoins(sdk.NewCoin(denom, sdkmath.OneInt()))},
 			expectedGas:             bankSendPerCoinGas,
 			expectedIsDeterministic: true,
 		},
@@ -277,10 +175,10 @@ func TestDeterministicGas_GasRequiredByMessage(t *testing.T) {
 			name: "bank.MsgMultiSend: 1 input & 1 output",
 			msg: &banktypes.MsgMultiSend{
 				Inputs: []banktypes.Input{
-					{Coins: sdk.NewCoins(sdk.NewCoin(denom, sdk.OneInt()))},
+					{Coins: sdk.NewCoins(sdk.NewCoin(denom, sdkmath.OneInt()))},
 				},
 				Outputs: []banktypes.Output{
-					{Coins: sdk.NewCoins(sdk.NewCoin(denom, sdk.OneInt()))},
+					{Coins: sdk.NewCoins(sdk.NewCoin(denom, sdkmath.OneInt()))},
 				},
 			},
 			expectedGas:             bankMultiSendPerOperationGas * 2,
@@ -293,8 +191,8 @@ func TestDeterministicGas_GasRequiredByMessage(t *testing.T) {
 					{Coins: sdk.NewCoins(sdk.NewCoin(denom, sdkmath.NewInt(2)))},
 				},
 				Outputs: []banktypes.Output{
-					{Coins: sdk.NewCoins(sdk.NewCoin(denom, sdk.OneInt()))},
-					{Coins: sdk.NewCoins(sdk.NewCoin(denom, sdk.OneInt()))},
+					{Coins: sdk.NewCoins(sdk.NewCoin(denom, sdkmath.OneInt()))},
+					{Coins: sdk.NewCoins(sdk.NewCoin(denom, sdkmath.OneInt()))},
 				},
 			},
 			expectedGas:             3 * bankMultiSendPerOperationGas,
@@ -317,41 +215,6 @@ func TestDeterministicGas_GasRequiredByMessage(t *testing.T) {
 			expectedIsDeterministic: true,
 		},
 		{
-			name:                    "authz.MsgExec: 0 messages",
-			msg:                     &authz.MsgExec{},
-			expectedGas:             authzMsgExecOverhead,
-			expectedIsDeterministic: true,
-		},
-		{
-			name: "authz.MsgExec: 1 bank.MsgSend & 1 bank.MsgMultiSend",
-			msg: lo.ToPtr(
-				authz.NewMsgExec(
-					sdk.AccAddress(address),
-					[]sdk.Msg{&banktypes.MsgSend{}, &banktypes.MsgMultiSend{}},
-				),
-			),
-			expectedGas:             authzMsgExecOverhead + bankSendPerCoinGas + 2*bankMultiSendPerOperationGas,
-			expectedIsDeterministic: true,
-		},
-		{
-			name: "authz.MsgExec: 1 authz.MsgExec (1 bank.MsgSend & 1 bank.MsgMultiSend) & bank.MsgSend",
-			msg: lo.ToPtr(
-				authz.NewMsgExec(
-					sdk.AccAddress(address),
-					[]sdk.Msg{
-						lo.ToPtr(authz.NewMsgExec(sdk.AccAddress(address), []sdk.Msg{&banktypes.MsgSend{}, &banktypes.MsgMultiSend{}})),
-						&banktypes.MsgSend{},
-					},
-				),
-			),
-			expectedGas: authzMsgExecOverhead +
-				authzMsgExecOverhead +
-				bankSendPerCoinGas +
-				2*bankMultiSendPerOperationGas +
-				bankSendPerCoinGas,
-			expectedIsDeterministic: true,
-		},
-		{
 			name: "authz.MsgExec: 1 bank.MsgSend & 1 wasm.MsgExecuteContract",
 			msg: lo.ToPtr(
 				authz.NewMsgExec(
@@ -371,5 +234,97 @@ func TestDeterministicGas_GasRequiredByMessage(t *testing.T) {
 			assert.Equal(t, tc.expectedIsDeterministic, isDeterministic)
 			assert.Equal(t, tc.expectedGas, gas)
 		})
+	}
+}
+
+func TestDeterministicGas_AuthzGrant(t *testing.T) {
+	address := sdk.AccAddress(ed25519.GenPrivKey().PubKey().Address())
+	testCases := []struct {
+		name            string
+		authzItemsCount int
+		expectedGas     uint64
+	}{
+		{
+			name:            "1_item",
+			authzItemsCount: 1,
+			expectedGas:     28000,
+		},
+		{
+			name:            "50_items",
+			authzItemsCount: 50,
+			expectedGas:     187000,
+		},
+		{
+			name:            "100_items",
+			authzItemsCount: 100,
+			expectedGas:     350000,
+		},
+	}
+	genAuthFuncs := []struct {
+		name string
+		fn   func(itemsCount int) authz.Authorization
+	}{
+		{
+			name: "send_auth",
+			fn: func(itemsCount int) authz.Authorization {
+				authorization := &assetnfttypes.SendAuthorization{}
+				for i := 0; i < itemsCount; i++ {
+					authorization.Nfts = append(authorization.Nfts, assetnfttypes.NFTIdentifier{
+						ClassId: "class-id-" + address.String(),
+						Id:      "id-" + address.String(),
+					})
+				}
+				return authorization
+			},
+		},
+		{
+			name: "mint_auth",
+			fn: func(itemsCount int) authz.Authorization {
+				authorization := &assetfttypes.MintAuthorization{}
+				for i := 0; i < itemsCount; i++ {
+					authorization.MintLimit = append(
+						authorization.MintLimit,
+						sdk.NewCoin("random-denom-"+address.String(), sdkmath.NewInt(1_000_000_000_000)),
+					)
+				}
+				return authorization
+			},
+		},
+		{
+			name: "burn_auth",
+			fn: func(itemsCount int) authz.Authorization {
+				authorization := &assetfttypes.BurnAuthorization{}
+				for i := 0; i < itemsCount; i++ {
+					authorization.BurnLimit = append(
+						authorization.BurnLimit,
+						sdk.NewCoin("random-denom-"+address.String(), sdkmath.NewInt(1_000_000_000_000)),
+					)
+				}
+				return authorization
+			},
+		},
+	}
+
+	cfg := deterministicgas.DefaultConfig()
+	for _, gen := range genAuthFuncs {
+		for _, tc := range testCases {
+			tc := tc
+			gen := gen
+			t.Run(tc.name+"_"+gen.name, func(t *testing.T) {
+				requireT := require.New(t)
+				authorization := gen.fn(tc.authzItemsCount)
+				grantMsg, err := authz.NewMsgGrant(
+					address,
+					address,
+					authorization,
+					lo.ToPtr(time.Now().Add(time.Minute)),
+				)
+				requireT.NoError(err)
+
+				deterministicGas, ok := cfg.GasRequiredByMessage(grantMsg)
+				requireT.True(ok)
+				requireT.InEpsilon(tc.expectedGas, deterministicGas, 0.3)
+			})
+		}
 	}
 }

@@ -3,14 +3,16 @@ package keeper
 import (
 	"context"
 
+	"cosmossdk.io/core/store"
 	sdkerrors "cosmossdk.io/errors"
+	"cosmossdk.io/log"
 	sdkmath "cosmossdk.io/math"
 	"github.com/cosmos/cosmos-sdk/codec"
-	storetypes "github.com/cosmos/cosmos-sdk/store/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
 	bankkeeper "github.com/cosmos/cosmos-sdk/x/bank/keeper"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
+	"github.com/samber/lo"
 
 	"github.com/CoreumFoundation/coreum/v4/x/wasm"
 	cwasmtypes "github.com/CoreumFoundation/coreum/v4/x/wasm/types"
@@ -28,15 +30,16 @@ type BaseKeeperWrapper struct {
 // NewKeeper returns a new BaseKeeperWrapper instance.
 func NewKeeper(
 	cdc codec.BinaryCodec,
-	storeKey storetypes.StoreKey,
+	storeService store.KVStoreService,
 	ak banktypes.AccountKeeper,
 	wasmKeeper cwasmtypes.WasmKeeper,
 	blockedAddrs map[string]bool,
 	ftProvider types.FungibleTokenProvider,
 	authority string,
+	logger log.Logger,
 ) BaseKeeperWrapper {
 	return BaseKeeperWrapper{
-		BaseKeeper: bankkeeper.NewBaseKeeper(cdc, storeKey, ak, blockedAddrs, authority),
+		BaseKeeper: bankkeeper.NewBaseKeeper(cdc, storeService, ak, blockedAddrs, authority, logger),
 		ak:         ak,
 		wasmKeeper: wasmKeeper,
 		ftProvider: ftProvider,
@@ -48,7 +51,7 @@ func NewKeeper(
 // the recipient address is black-listed or if sending the tokens fails.
 // !!! The code is the copy of the corresponding func of the bank module !!!
 func (k BaseKeeperWrapper) SendCoinsFromModuleToAccount(
-	ctx sdk.Context, senderModule string, recipientAddr sdk.AccAddress, amt sdk.Coins,
+	ctx context.Context, senderModule string, recipientAddr sdk.AccAddress, amt sdk.Coins,
 ) error {
 	senderAddr := k.ak.GetModuleAddress(senderModule)
 	if senderAddr == nil {
@@ -66,7 +69,7 @@ func (k BaseKeeperWrapper) SendCoinsFromModuleToAccount(
 // It will panic if either module account does not exist.
 // !!! The code is the copy of the corresponding func of the bank module !!!
 func (k BaseKeeperWrapper) SendCoinsFromModuleToModule(
-	ctx sdk.Context, senderModule, recipientModule string, amt sdk.Coins,
+	ctx context.Context, senderModule, recipientModule string, amt sdk.Coins,
 ) error {
 	senderAddr := k.ak.GetModuleAddress(senderModule)
 	if senderAddr == nil {
@@ -85,7 +88,7 @@ func (k BaseKeeperWrapper) SendCoinsFromModuleToModule(
 // It will panic if the module account does not exist.
 // !!! The code is the copy of the corresponding func of the bank module !!!
 func (k BaseKeeperWrapper) SendCoinsFromAccountToModule(
-	ctx sdk.Context, senderAddr sdk.AccAddress, recipientModule string, amt sdk.Coins,
+	ctx context.Context, senderAddr sdk.AccAddress, recipientModule string, amt sdk.Coins,
 ) error {
 	recipientAcc := k.ak.GetModuleAccount(ctx, recipientModule)
 	if recipientAcc == nil {
@@ -96,7 +99,10 @@ func (k BaseKeeperWrapper) SendCoinsFromAccountToModule(
 }
 
 // SendCoins is a BaseKeeper SendCoins wrapped method.
-func (k BaseKeeperWrapper) SendCoins(ctx sdk.Context, fromAddr, toAddr sdk.AccAddress, amt sdk.Coins) error {
+//
+//nolint:contextcheck // this is correct context passing.
+func (k BaseKeeperWrapper) SendCoins(goCtx context.Context, fromAddr, toAddr sdk.AccAddress, amt sdk.Coins) error {
+	ctx := sdk.UnwrapSDKContext(goCtx)
 	if k.isSmartContract(ctx, fromAddr) {
 		ctx = cwasmtypes.WithSmartContractSender(ctx, fromAddr.String())
 	}
@@ -104,26 +110,24 @@ func (k BaseKeeperWrapper) SendCoins(ctx sdk.Context, fromAddr, toAddr sdk.AccAd
 		ctx = cwasmtypes.WithSmartContractRecipient(ctx, toAddr.String())
 	}
 
-	if err := k.ftProvider.BeforeSendCoins(ctx, fromAddr, toAddr, amt); err != nil {
-		return err
-	}
-
-	return k.BaseKeeper.SendCoins(ctx, fromAddr, toAddr, amt)
+	return k.ftProvider.BeforeSendCoins(ctx, fromAddr, toAddr, amt)
 }
 
 // InputOutputCoins is a BaseKeeper InputOutputCoins wrapped method.
+//
+//nolint:contextcheck // this is correct context passing.
 func (k BaseKeeperWrapper) InputOutputCoins(
-	ctx sdk.Context, inputs []banktypes.Input, outputs []banktypes.Output,
+	goCtx context.Context, input banktypes.Input, outputs []banktypes.Output,
 ) error {
-	for _, input := range inputs {
-		addr, err := sdk.AccAddressFromBech32(input.Address)
-		if err != nil {
-			return err
-		}
-		if k.isSmartContract(ctx, addr) {
-			ctx = cwasmtypes.WithSmartContractSender(ctx, input.Address)
-		}
+	ctx := sdk.UnwrapSDKContext(goCtx)
+	addr, err := sdk.AccAddressFromBech32(input.Address)
+	if err != nil {
+		return err
 	}
+	if k.isSmartContract(ctx, addr) {
+		ctx = cwasmtypes.WithSmartContractSender(ctx, input.Address)
+	}
+
 	for _, output := range outputs {
 		addr, err := sdk.AccAddressFromBech32(output.Address)
 		if err != nil {
@@ -134,11 +138,7 @@ func (k BaseKeeperWrapper) InputOutputCoins(
 		}
 	}
 
-	if err := k.ftProvider.BeforeInputOutputCoins(ctx, inputs, outputs); err != nil {
-		return err
-	}
-
-	return k.BaseKeeper.InputOutputCoins(ctx, inputs, outputs)
+	return k.ftProvider.BeforeInputOutputCoins(ctx, input, outputs)
 }
 
 // ********** Query server **********
@@ -148,19 +148,31 @@ func (k BaseKeeperWrapper) InputOutputCoins(
 func (k BaseKeeperWrapper) SpendableBalances(
 	ctx context.Context, req *banktypes.QuerySpendableBalancesRequest,
 ) (*banktypes.QuerySpendableBalancesResponse, error) {
-	res, err := k.BaseKeeper.SpendableBalances(ctx, req)
-	if err != nil {
-		return nil, err
-	}
 	addr, err := sdk.AccAddressFromBech32(req.Address)
 	if err != nil {
 		return nil, sdkerrors.Wrapf(cosmoserrors.ErrInvalidAddress, "invalid address %s", req.Address)
 	}
-	for i := range res.Balances {
-		res.Balances[i] = k.getSpendableCoin(sdk.UnwrapSDKContext(ctx), addr, res.Balances[i])
+
+	balancesRes, err := k.BaseKeeper.AllBalances(ctx, &banktypes.QueryAllBalancesRequest{
+		Address:    req.Address,
+		Pagination: req.Pagination,
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	return res, nil
+	bankLockedCoins := k.BaseKeeper.LockedCoins(ctx, addr)
+
+	balances := balancesRes.Balances
+	for i := range balances {
+		bankLockedCoin := sdk.NewCoin(balances[i].Denom, bankLockedCoins.AmountOf(balances[i].Denom))
+		balances[i] = k.getSpendableCoin(sdk.UnwrapSDKContext(ctx), addr, balances[i], bankLockedCoin)
+	}
+
+	return &banktypes.QuerySpendableBalancesResponse{
+		Balances:   balances,
+		Pagination: balancesRes.Pagination,
+	}, nil
 }
 
 // SpendableBalanceByDenom implements a gRPC query handler for retrieving an account's spendable balance for a specific
@@ -168,29 +180,45 @@ func (k BaseKeeperWrapper) SpendableBalances(
 func (k BaseKeeperWrapper) SpendableBalanceByDenom(
 	ctx context.Context, req *banktypes.QuerySpendableBalanceByDenomRequest,
 ) (*banktypes.QuerySpendableBalanceByDenomResponse, error) {
-	res, err := k.BaseKeeper.SpendableBalanceByDenom(ctx, req)
-	if err != nil {
-		return nil, err
-	}
 	addr, err := sdk.AccAddressFromBech32(req.Address)
 	if err != nil {
 		return nil, sdkerrors.Wrapf(cosmoserrors.ErrInvalidAddress, "invalid address %s", req.Address)
 	}
-	if res.Balance == nil {
-		return res, nil
+
+	balanceRes, err := k.BaseKeeper.Balance(ctx, &banktypes.QueryBalanceRequest{
+		Address: req.Address,
+		Denom:   req.Denom,
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	spendableCoin := k.getSpendableCoin(sdk.UnwrapSDKContext(ctx), addr, *res.Balance)
-	res.Balance = &spendableCoin
+	if balanceRes.Balance == nil {
+		return &banktypes.QuerySpendableBalanceByDenomResponse{}, nil
+	}
 
-	return res, nil
+	bankLockedCoins := k.BaseKeeper.LockedCoins(ctx, addr)
+	bankLockedCoin := sdk.NewCoin(req.Denom, bankLockedCoins.AmountOf(req.Denom))
+
+	return &banktypes.QuerySpendableBalanceByDenomResponse{
+		Balance: lo.ToPtr(k.getSpendableCoin(sdk.UnwrapSDKContext(ctx), addr, *balanceRes.Balance, bankLockedCoin)),
+	}, nil
 }
 
-func (k BaseKeeperWrapper) getSpendableCoin(ctx sdk.Context, addr sdk.AccAddress, coin sdk.Coin) sdk.Coin {
-	denom := coin.Denom
-	frozenCoin := k.ftProvider.GetFrozenBalance(ctx, addr, denom)
-	spendableAmount := coin.Amount.Sub(frozenCoin.Amount)
-	if spendableAmount.IsNegative() {
+func (k BaseKeeperWrapper) getSpendableCoin(
+	ctx sdk.Context,
+	addr sdk.AccAddress,
+	balance, bankLocked sdk.Coin,
+) sdk.Coin {
+	denom := balance.Denom
+	notLockedAmt := balance.Amount.
+		Sub(bankLocked.Amount).
+		Sub(k.ftProvider.GetDEXLockedBalance(ctx, addr, denom).Amount)
+
+	notFrozenAmt := balance.Amount.Sub(k.ftProvider.GetFrozenBalance(ctx, addr, denom).Amount)
+
+	spendableAmount := sdkmath.MinInt(notLockedAmt, notFrozenAmt)
+	if !spendableAmount.IsPositive() {
 		return sdk.NewCoin(denom, sdkmath.ZeroInt())
 	}
 

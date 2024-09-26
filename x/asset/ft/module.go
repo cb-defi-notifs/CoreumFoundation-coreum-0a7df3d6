@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	abci "github.com/cometbft/cometbft/abci/types"
+	"cosmossdk.io/core/appmodule"
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/codec"
 	cdctypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -18,15 +18,19 @@ import (
 
 	"github.com/CoreumFoundation/coreum/v4/x/asset/ft/client/cli"
 	"github.com/CoreumFoundation/coreum/v4/x/asset/ft/keeper"
-	v1 "github.com/CoreumFoundation/coreum/v4/x/asset/ft/migrations/v1"
+	v3 "github.com/CoreumFoundation/coreum/v4/x/asset/ft/migrations/v3"
 	"github.com/CoreumFoundation/coreum/v4/x/asset/ft/simulation"
 	"github.com/CoreumFoundation/coreum/v4/x/asset/ft/types"
 )
 
 var (
-	_ module.AppModule      = AppModule{}
-	_ module.HasGenesis     = AppModule{}
-	_ module.AppModuleBasic = AppModuleBasic{}
+	_ module.AppModule           = AppModule{}
+	_ module.AppModuleBasic      = AppModule{}
+	_ module.AppModuleSimulation = AppModule{}
+	_ module.HasGenesis          = AppModule{}
+	_ module.HasServices         = AppModule{}
+
+	_ appmodule.AppModule = AppModule{}
 )
 
 // ----------------------------------------------------------------------------
@@ -106,7 +110,7 @@ type AppModule struct {
 	keeper        keeper.Keeper
 	accountKeeper types.AccountKeeper
 	bankKeeper    types.BankKeeper
-	paramsKeeper  v1.ParamsKeeper
+	paramsKeeper  v3.ParamsKeeper
 }
 
 // NewAppModule returns the new instance of the AppModule.
@@ -115,7 +119,7 @@ func NewAppModule(
 	keeper keeper.Keeper,
 	accountKeeper types.AccountKeeper,
 	bankKeeper types.BankKeeper,
-	paramsKeeper v1.ParamsKeeper,
+	paramsKeeper v3.ParamsKeeper,
 ) AppModule {
 	return AppModule{
 		AppModuleBasic: NewAppModuleBasic(cdc),
@@ -131,6 +135,12 @@ func (am AppModule) Name() string {
 	return am.AppModuleBasic.Name()
 }
 
+// IsAppModule implements the appmodule.AppModule interface.
+func (am AppModule) IsAppModule() {}
+
+// IsOnePerModuleType implements the depinject.OnePerModuleType interface.
+func (am AppModule) IsOnePerModuleType() {}
+
 // RegisterServices registers a GRPC query service to respond to the
 // module-specific GRPC queries.
 func (am AppModule) RegisterServices(cfg module.Configurator) {
@@ -138,10 +148,7 @@ func (am AppModule) RegisterServices(cfg module.Configurator) {
 	types.RegisterQueryServer(cfg.QueryServer(), keeper.NewQueryService(am.keeper, am.bankKeeper))
 
 	m := keeper.NewMigrator(am.keeper, am.paramsKeeper)
-	if err := cfg.RegisterMigration(types.ModuleName, 1, m.Migrate1to2); err != nil {
-		panic(err)
-	}
-	if err := cfg.RegisterMigration(types.ModuleName, 2, m.Migrate2to3); err != nil {
+	if err := cfg.RegisterMigration(types.ModuleName, 3, m.Migrate3to4); err != nil {
 		panic(err)
 	}
 }
@@ -153,14 +160,12 @@ func (am AppModule) RegisterInvariants(ir sdk.InvariantRegistry) {
 
 // InitGenesis performs the asset ft module's genesis initialization It returns
 // no validator updates.
-func (am AppModule) InitGenesis(ctx sdk.Context, cdc codec.JSONCodec, gs json.RawMessage) []abci.ValidatorUpdate {
+func (am AppModule) InitGenesis(ctx sdk.Context, cdc codec.JSONCodec, gs json.RawMessage) {
 	var genState types.GenesisState
 	// Initialize global index to index in genesis state
 	cdc.MustUnmarshalJSON(gs, &genState)
 
 	InitGenesis(ctx, am.keeper, genState)
-
-	return []abci.ValidatorUpdate{}
 }
 
 // ExportGenesis returns the asset ft module's exported genesis state as raw JSON bytes.
@@ -170,7 +175,7 @@ func (am AppModule) ExportGenesis(ctx sdk.Context, cdc codec.JSONCodec) json.Raw
 }
 
 // ConsensusVersion implements ConsensusVersion.
-func (AppModule) ConsensusVersion() uint64 { return 3 }
+func (AppModule) ConsensusVersion() uint64 { return 4 }
 
 // AppModuleSimulation functions
 
@@ -178,7 +183,7 @@ func (AppModule) ConsensusVersion() uint64 { return 3 }
 func (AppModule) GenerateGenesisState(_ *module.SimulationState) {}
 
 // RegisterStoreDecoder registers a decoder for asset ft module's types.
-func (am AppModule) RegisterStoreDecoder(_ sdk.StoreDecoderRegistry) {}
+func (am AppModule) RegisterStoreDecoder(_ simtypes.StoreDecoderRegistry) {}
 
 // WeightedOperations returns the all the asset ft module operations with their respective weights.
 func (am AppModule) WeightedOperations(simState module.SimulationState) []simtypes.WeightedOperation {

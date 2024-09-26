@@ -21,4 +21,8 @@ var (
 	ErrWhitelistedLimitExceeded = sdkerrors.Register(ModuleName, 7, "whitelisted limit exceeded")
 	// ErrInvalidState is returned when state of the module is invalid.
 	ErrInvalidState = sdkerrors.Register(ModuleName, 8, "invalid state")
+	// ErrExtensionCallFailed is returned when the execution of the asset extensino fails.
+	ErrExtensionCallFailed = sdkerrors.Register(ModuleName, 9, "call to asset extension failed")
+	// ErrDEXSettingsNotFound error for a DEX settings not found in the store.
+	ErrDEXSettingsNotFound = sdkerrors.Register(ModuleName, 10, "DEX settings not found")
 )

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sdkmath "cosmossdk.io/math"
+	"cosmossdk.io/x/nft"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
@@ -17,7 +18,6 @@ import (
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
 	govtypesv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
-	"github.com/cosmos/cosmos-sdk/x/nft"
 	"github.com/cosmos/gogoproto/proto"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
@@ -69,7 +69,7 @@ func TestAssetNFTIssueClass(t *testing.T) {
 			assetnfttypes.ClassFeature_burning,
 			assetnfttypes.ClassFeature_disable_sending,
 		},
-		RoyaltyRate: sdk.MustNewDecFromStr("0.1"),
+		RoyaltyRate: sdkmath.LegacyMustNewDecFromStr("0.1"),
 	}
 
 	chain.FundAccountWithOptions(ctx, t, issuer, integration.BalancesOptions{
@@ -94,30 +94,6 @@ func TestAssetNFTIssueClass(t *testing.T) {
 		Features: []assetnfttypes.ClassFeature{
 			assetnfttypes.ClassFeature_burning,
 		},
-	}
-	_, err = client.BroadcastTx(
-		ctx,
-		chain.ClientContext.WithFromAddress(issuer),
-		chain.TxFactory().WithGas(chain.GasLimitByMsgs(invalidIssueMsg)),
-		invalidIssueMsg,
-	)
-	requireT.True(assetnfttypes.ErrInvalidInput.Is(err))
-
-	// issue new NFT class with too long data
-
-	invalidData, err = codectypes.NewAnyWithValue(
-		&assetnfttypes.DataBytes{Data: bytes.Repeat([]byte{0x01}, assetnfttypes.MaxDataSize+1)},
-	)
-	requireT.NoError(err)
-
-	invalidIssueMsg = &assetnfttypes.MsgIssueClass{
-		Issuer:      issuer.String(),
-		Symbol:      "symbol",
-		Name:        "name",
-		Description: "description",
-		URI:         "https://my-class-meta.invalid/1",
-		URIHash:     "content-hash",
-		Data:        invalidData,
 	}
 	_, err = client.BroadcastTx(
 		ctx,
@@ -160,7 +136,7 @@ func TestAssetNFTIssueClass(t *testing.T) {
 			assetnfttypes.ClassFeature_burning,
 			assetnfttypes.ClassFeature_disable_sending,
 		},
-		RoyaltyRate: sdk.MustNewDecFromStr("0.1"),
+		RoyaltyRate: sdkmath.LegacyMustNewDecFromStr("0.1"),
 	}, issuedEvent)
 
 	// query nft asset with features
@@ -182,7 +158,7 @@ func TestAssetNFTIssueClass(t *testing.T) {
 			assetnfttypes.ClassFeature_burning,
 			assetnfttypes.ClassFeature_disable_sending,
 		},
-		RoyaltyRate: sdk.MustNewDecFromStr("0.1"),
+		RoyaltyRate: sdkmath.LegacyMustNewDecFromStr("0.1"),
 	}
 	requireT.Equal(expectedClass, assetNftClassRes.Class)
 
@@ -198,6 +174,141 @@ func TestAssetNFTIssueClass(t *testing.T) {
 	requireT.Len(assetNftClassesRes.Classes, 1)
 	requireT.Equal(uint64(1), assetNftClassesRes.Pagination.Total)
 	requireT.Equal(expectedClass, assetNftClassesRes.Classes[0])
+}
+
+// TestAssetNFTUpdate tests non-fungible token update.
+func TestAssetNFTUpdate(t *testing.T) {
+	t.Parallel()
+
+	ctx, chain := integrationtests.NewCoreumTestingContext(t)
+
+	requireT := require.New(t)
+	issuer := chain.GenAccount()
+	owner := chain.GenAccount()
+
+	nftClient := nft.NewQueryClient(chain.ClientContext)
+
+	issueMsg := &assetnfttypes.MsgIssueClass{
+		Issuer: issuer.String(),
+		Symbol: "symbol",
+		Name:   "name",
+		Data:   nil,
+	}
+
+	chain.FundAccountWithOptions(ctx, t, issuer, integration.BalancesOptions{
+		Messages: []sdk.Msg{
+			issueMsg,
+		},
+	})
+
+	_, err := client.BroadcastTx(
+		ctx,
+		chain.ClientContext.WithFromAddress(issuer),
+		chain.TxFactory().WithGas(chain.GasLimitByMsgs(issueMsg)),
+		issueMsg,
+	)
+	requireT.NoError(err)
+
+	classID := assetnfttypes.BuildClassID(issueMsg.Symbol, issuer)
+
+	jsonData := []byte(`{"name": "Name", "description": "Description"}`)
+	dataDynamic := assetnfttypes.DataDynamic{
+		Items: []assetnfttypes.DataDynamicItem{
+			{
+				Editors: []assetnfttypes.DataEditor{
+					assetnfttypes.DataEditor_owner,
+				},
+				Data: jsonData,
+			},
+		},
+	}
+	data, err := codectypes.NewAnyWithValue(&dataDynamic)
+	requireT.NoError(err)
+
+	mintMsg := &assetnfttypes.MsgMint{
+		Sender:    issuer.String(),
+		Recipient: owner.String(),
+		ID:        "id-1",
+		ClassID:   classID,
+		Data:      data,
+	}
+
+	chain.FundAccountWithOptions(ctx, t, issuer, integration.BalancesOptions{
+		Messages: []sdk.Msg{
+			mintMsg,
+		},
+	})
+
+	txRes, err := client.BroadcastTx(
+		ctx,
+		chain.ClientContext.WithFromAddress(issuer),
+		chain.TxFactory().WithGas(chain.GasLimitByMsgs(mintMsg)),
+		mintMsg,
+	)
+	requireT.NoError(err)
+	requireT.EqualValues(txRes.GasUsed, chain.GasLimitByMsgs(mintMsg))
+
+	storedNFT, err := nftClient.NFT(ctx, &nft.QueryNFTRequest{
+		ClassId: mintMsg.ClassID,
+		Id:      mintMsg.ID,
+	})
+	requireT.NoError(err)
+
+	var storedDataDynamic assetnfttypes.DataDynamic
+	requireT.NoError(storedDataDynamic.Unmarshal(storedNFT.Nft.Data.Value))
+	requireT.Equal(dataDynamic, storedDataDynamic)
+
+	// update stored NFT
+	msgUpdateData := &assetnfttypes.MsgUpdateData{
+		Sender:  owner.String(),
+		ClassID: mintMsg.ClassID,
+		ID:      mintMsg.ID,
+		Items: []assetnfttypes.DataDynamicIndexedItem{
+			{
+				Index: 0,
+				Data:  []byte("new-data"),
+			},
+		},
+	}
+	chain.FundAccountWithOptions(ctx, t, owner, integration.BalancesOptions{
+		Messages: []sdk.Msg{
+			msgUpdateData,
+		},
+	})
+
+	txRes, err = client.BroadcastTx(
+		ctx,
+		chain.ClientContext.WithFromAddress(owner),
+		chain.TxFactory().WithGas(chain.GasLimitByMsgs(msgUpdateData)),
+		msgUpdateData,
+	)
+	requireT.NoError(err)
+	requireT.EqualValues(txRes.GasUsed, chain.GasLimitByMsgs(msgUpdateData))
+
+	storedNFT, err = nftClient.NFT(ctx, &nft.QueryNFTRequest{
+		ClassId: mintMsg.ClassID,
+		Id:      mintMsg.ID,
+	})
+	requireT.NoError(err)
+
+	var updatedDataDynamic assetnfttypes.DataDynamic
+	requireT.NoError(updatedDataDynamic.Unmarshal(storedNFT.Nft.Data.Value))
+	requireT.Equal(string(msgUpdateData.Items[0].Data), string(updatedDataDynamic.Items[0].Data))
+
+	// try to update from issuer
+	msgUpdateData.Sender = issuer.String()
+	chain.FundAccountWithOptions(ctx, t, issuer, integration.BalancesOptions{
+		Messages: []sdk.Msg{
+			msgUpdateData,
+		},
+	})
+	_, err = client.BroadcastTx(
+		ctx,
+		chain.ClientContext.WithFromAddress(issuer),
+		chain.TxFactory().WithGas(chain.GasLimitByMsgs(msgUpdateData)),
+		msgUpdateData,
+	)
+	requireT.ErrorIs(err, cosmoserrors.ErrUnauthorized)
 }
 
 // TestAssetNFTIssueClassInvalidFeatures tests non-fungible token class creation with invalid features.
@@ -221,7 +332,7 @@ func TestAssetNFTIssueClassInvalidFeatures(t *testing.T) {
 		Description: "description",
 		URI:         "https://my-class-meta.invalid/1",
 		URIHash:     "content-hash",
-		RoyaltyRate: sdk.ZeroDec(),
+		RoyaltyRate: sdkmath.LegacyZeroDec(),
 		Features: []assetnfttypes.ClassFeature{
 			assetnfttypes.ClassFeature_burning,
 			assetnfttypes.ClassFeature_freezing,
@@ -245,7 +356,7 @@ func TestAssetNFTIssueClassInvalidFeatures(t *testing.T) {
 		Description: "description",
 		URI:         "https://my-class-meta.invalid/1",
 		URIHash:     "content-hash",
-		RoyaltyRate: sdk.ZeroDec(),
+		RoyaltyRate: sdkmath.LegacyZeroDec(),
 		Features: []assetnfttypes.ClassFeature{
 			assetnfttypes.ClassFeature_burning,
 			100,
@@ -421,29 +532,6 @@ func TestAssetNFTMint(t *testing.T) {
 	)
 	requireT.True(assetnfttypes.ErrInvalidInput.Is(err))
 
-	// mint with too long data
-
-	invalidData, err = codectypes.NewAnyWithValue(
-		&assetnfttypes.DataBytes{Data: bytes.Repeat([]byte{0x01}, assetnfttypes.MaxDataSize+1)},
-	)
-	requireT.NoError(err)
-
-	invalidMintMsg = &assetnfttypes.MsgMint{
-		Sender:  issuer.String(),
-		ID:      "id-1",
-		ClassID: classID,
-		URI:     "https://my-class-meta.invalid/1",
-		URIHash: "content-hash",
-		Data:    invalidData,
-	}
-	_, err = client.BroadcastTx(
-		ctx,
-		chain.ClientContext.WithFromAddress(issuer),
-		chain.TxFactory().WithGas(chain.GasLimitByMsgs(invalidMintMsg)),
-		invalidMintMsg,
-	)
-	requireT.True(assetnfttypes.ErrInvalidInput.Is(err))
-
 	// mint new token in that class
 
 	// we need to do this, otherwise assertion fails because some private fields are set differently
@@ -565,8 +653,8 @@ func TestAssetNFTMint(t *testing.T) {
 	requireT.Equal(chain.NewCoin(sdkmath.ZeroInt()).String(), resp.Balance.String())
 }
 
-// TestAssetNFTWithMaxData tests that class and NFT with data of maximum length works.
-func TestAssetNFTWithMaxData(t *testing.T) {
+// TestAssetNFTWithLongData tests that class and NFT with long data works.
+func TestAssetNFTWithLongData(t *testing.T) {
 	t.Parallel()
 
 	ctx, chain := integrationtests.NewCoreumTestingContext(t)
@@ -574,16 +662,21 @@ func TestAssetNFTWithMaxData(t *testing.T) {
 	requireT := require.New(t)
 	issuer := chain.GenAccount()
 
+	// func account initially to create it on chain
+	chain.FundAccountWithOptions(ctx, t, issuer, integration.BalancesOptions{
+		Messages: []sdk.Msg{
+			&assetnfttypes.MsgIssueClass{},
+			&assetnfttypes.MsgMint{},
+		},
+		// minting fee and some tokens on top to cover the extra bytes
+		Amount: chain.QueryAssetNFTParams(ctx, t).MintFee.Amount.AddRaw(100_000),
+	})
+
 	authParams, err := authtypes.NewQueryClient(chain.ClientContext).Params(ctx, &authtypes.QueryParamsRequest{})
 	require.NoError(t, err)
 
-	const (
-		extraBytesIssue = 3395
-		extraBytesMint  = 3441
-	)
-
 	data, err := codectypes.NewAnyWithValue(
-		&assetnfttypes.DataBytes{Data: bytes.Repeat([]byte{0x01}, assetnfttypes.MaxDataSize-3)},
+		&assetnfttypes.DataBytes{Data: bytes.Repeat([]byte{0x01}, 6000)},
 	) // 3 bytes added by Any
 	requireT.NoError(err)
 
@@ -594,40 +687,38 @@ func TestAssetNFTWithMaxData(t *testing.T) {
 		Data:   data,
 	}
 
-	mintMsg := &assetnfttypes.MsgMint{
-		Sender: issuer.String(),
-		ID:     "id-1",
-		Data:   data,
-	}
-
-	chain.FundAccountWithOptions(ctx, t, issuer, integration.BalancesOptions{
-		Messages: []sdk.Msg{
-			issueMsg,
-			mintMsg,
-			&assetnfttypes.MsgMint{},
-		},
-		NondeterministicMessagesGas: (extraBytesIssue + extraBytesMint) * authParams.Params.TxSizeCostPerByte,
-		Amount:                      chain.QueryAssetNFTParams(ctx, t).MintFee.Amount,
-	})
+	txBytes, err := chain.BuildSignedTx(ctx, chain.TxFactoryAuto(), issuer, issueMsg)
+	requireT.NoError(err)
+	extraBytes := uint64(len(txBytes)) - chain.DeterministicGasConfig.FreeBytes
 
 	resp, err := client.BroadcastTx(
 		ctx,
 		chain.ClientContext.WithFromAddress(issuer),
-		chain.TxFactory().WithGas(chain.GasLimitByMsgs(issueMsg)+extraBytesIssue*authParams.Params.TxSizeCostPerByte),
+		chain.TxFactory().WithGas(chain.GasLimitByMsgs(issueMsg)+extraBytes*authParams.Params.TxSizeCostPerByte),
 		issueMsg,
 	)
 	requireT.NoError(err)
-	requireT.EqualValues(len(resp.Tx.GetValue()), chain.DeterministicGasConfig.FreeBytes+extraBytesIssue)
+	requireT.EqualValues(len(resp.Tx.GetValue()), chain.DeterministicGasConfig.FreeBytes+extraBytes)
 
-	mintMsg.ClassID = assetnfttypes.BuildClassID(issueMsg.Symbol, issuer)
+	mintMsg := &assetnfttypes.MsgMint{
+		Sender:  issuer.String(),
+		ClassID: assetnfttypes.BuildClassID(issueMsg.Symbol, issuer),
+		ID:      "id-1",
+		Data:    data,
+	}
+
+	txBytes, err = chain.BuildSignedTx(ctx, chain.TxFactoryAuto(), issuer, mintMsg)
+	requireT.NoError(err)
+	extraBytes = uint64(len(txBytes)) - chain.DeterministicGasConfig.FreeBytes
+
 	resp, err = client.BroadcastTx(
 		ctx,
 		chain.ClientContext.WithFromAddress(issuer),
-		chain.TxFactory().WithGas(chain.GasLimitByMsgs(mintMsg)+extraBytesMint*authParams.Params.TxSizeCostPerByte),
+		chain.TxFactory().WithGas(chain.GasLimitByMsgs(mintMsg)+extraBytes*authParams.Params.TxSizeCostPerByte),
 		mintMsg,
 	)
 	requireT.NoError(err)
-	requireT.EqualValues(len(resp.Tx.GetValue()), chain.DeterministicGasConfig.FreeBytes+extraBytesMint)
+	requireT.EqualValues(len(resp.Tx.GetValue()), chain.DeterministicGasConfig.FreeBytes+extraBytes)
 }
 
 // TestAssetNFTMintFeeProposal tests proposal upgrading mint fee.
@@ -639,7 +730,7 @@ func TestAssetNFTMintFeeProposal(t *testing.T) {
 	requireT := require.New(t)
 	origParams := chain.QueryAssetNFTParams(ctx, t)
 	newParams := origParams
-	newParams.MintFee.Amount = sdk.OneInt()
+	newParams.MintFee.Amount = sdkmath.OneInt()
 	chain.Governance.ProposalFromMsgAndVote(
 		ctx, t, nil,
 		"-", "-", "-", govtypesv1.OptionYes,
@@ -655,7 +746,7 @@ func TestAssetNFTMintFeeProposal(t *testing.T) {
 			&assetnfttypes.MsgIssueClass{},
 			&assetnfttypes.MsgMint{},
 		},
-		Amount: sdk.OneInt(),
+		Amount: sdkmath.OneInt(),
 	})
 
 	// issue new NFT class
@@ -692,7 +783,7 @@ func TestAssetNFTMintFeeProposal(t *testing.T) {
 
 	burntStr, err := event.FindStringEventAttribute(res.Events, banktypes.EventTypeCoinBurn, sdk.AttributeKeyAmount)
 	requireT.NoError(err)
-	requireT.Equal(sdk.NewCoin(chain.ChainSettings.Denom, sdk.OneInt()).String(), burntStr)
+	requireT.Equal(sdk.NewCoin(chain.ChainSettings.Denom, sdkmath.OneInt()).String(), burntStr)
 
 	// check that balance is 0 meaning mint fee was taken
 
@@ -1814,16 +1905,14 @@ func TestAssetNFTAuthZ(t *testing.T) {
 	execMsg := authztypes.NewMsgExec(grantee, []sdk.Msg{freezeMsg})
 
 	chain.FundAccountWithOptions(ctx, t, grantee, integration.BalancesOptions{
-		Messages: []sdk.Msg{
-			&execMsg,
-		},
-		Amount: chain.QueryAssetNFTParams(ctx, t).MintFee.Amount,
+		Amount: chain.QueryAssetNFTParams(ctx, t).MintFee.Amount.
+			Add(sdkmath.NewInt(20_000)),
 	})
 
 	_, err = client.BroadcastTx(
 		ctx,
 		chain.ClientContext.WithFromAddress(grantee),
-		chain.TxFactory().WithGas(chain.GasLimitByMsgs(&execMsg)),
+		chain.TxFactoryAuto(),
 		&execMsg,
 	)
 	requireT.NoError(err)
@@ -2301,13 +2390,13 @@ func TestAssetNFTSendAuthorization(t *testing.T) {
 		Messages: []sdk.Msg{
 			&assetnfttypes.MsgIssueClass{},
 			&assetnfttypes.MsgMint{},
-			&authztypes.MsgGrant{},
 		},
-		Amount: chain.QueryAssetNFTParams(ctx, t).MintFee.Amount,
+		Amount: chain.QueryAssetNFTParams(ctx, t).MintFee.Amount.
+			Add(sdkmath.NewInt(20_000)), // added 20k for the grant msg
 	})
 
 	chain.FundAccountWithOptions(ctx, t, grantee, integration.BalancesOptions{
-		Amount: sdk.NewInt(1),
+		Amount: sdkmath.NewInt(1),
 	})
 
 	// issue new NFT class
@@ -2345,16 +2434,13 @@ func TestAssetNFTSendAuthorization(t *testing.T) {
 	execMsg := authztypes.NewMsgExec(grantee, []sdk.Msg{sendMsg})
 
 	chain.FundAccountWithOptions(ctx, t, grantee, integration.BalancesOptions{
-		Messages: []sdk.Msg{
-			&execMsg,
-			&execMsg,
-		},
+		Amount: sdkmath.NewInt(40_000),
 	})
 
 	_, err = client.BroadcastTx(
 		ctx,
 		chain.ClientContext.WithFromAddress(grantee),
-		chain.TxFactory().WithGas(chain.GasLimitByMsgs(&execMsg)),
+		chain.TxFactory().WithGas(200_000),
 		&execMsg,
 	)
 	requireT.Error(err)
@@ -2397,7 +2483,7 @@ func TestAssetNFTSendAuthorization(t *testing.T) {
 	_, err = client.BroadcastTx(
 		ctx,
 		chain.ClientContext.WithFromAddress(grantee),
-		chain.TxFactory().WithGas(chain.GasLimitByMsgs(&execMsg)),
+		chain.TxFactoryAuto(),
 		&execMsg,
 	)
 	requireT.NoError(err)

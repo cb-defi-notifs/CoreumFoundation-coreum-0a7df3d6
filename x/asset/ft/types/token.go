@@ -9,13 +9,11 @@ import (
 	sdkmath "cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	cosmoserrors "github.com/cosmos/cosmos-sdk/types/errors"
-	"github.com/cosmos/gogoproto/proto"
-	ibctypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
+	ibctypes "github.com/cosmos/ibc-go/v8/modules/apps/transfer/types"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 
 	"github.com/CoreumFoundation/coreum/v4/pkg/config/constant"
-	delaytypes "github.com/CoreumFoundation/coreum/v4/x/delay/types"
 )
 
 var (
@@ -55,8 +53,10 @@ type IssueSettings struct {
 	URIHash            string
 	InitialAmount      sdkmath.Int
 	Features           []Feature
-	BurnRate           sdk.Dec
-	SendCommissionRate sdk.Dec
+	BurnRate           sdkmath.LegacyDec
+	SendCommissionRate sdkmath.LegacyDec
+	ExtensionSettings  *ExtensionIssueSettings
+	DEXSettings        *DEXSettings
 }
 
 // BuildDenom builds the denom string from the symbol and issuer address.
@@ -137,8 +137,8 @@ func ValidateAssetCoins(coins sdk.Coins) error {
 
 // ValidatePrecision checks the provided precision is valid.
 func ValidatePrecision(precision uint32) error {
-	if precision == 0 || precision > MaxPrecision {
-		return sdkerrors.Wrapf(ErrInvalidInput, "precision must be between 1 and %d", MaxPrecision)
+	if precision > MaxPrecision {
+		return sdkerrors.Wrapf(ErrInvalidInput, "precision must be between 0 and %d", MaxPrecision)
 	}
 	return nil
 }
@@ -182,8 +182,8 @@ func (def Definition) CheckFeatureAllowed(addr sdk.AccAddress, feature Feature) 
 // IsFeatureAllowed returns true if feature is allowed for the address.
 func (def Definition) IsFeatureAllowed(addr sdk.Address, feature Feature) bool {
 	featureEnabled := def.IsFeatureEnabled(feature)
-	// issuer can use any enabled feature and burning even if it is disabled
-	if def.IsIssuer(addr) {
+	// token admin and asset extension contract can use any enabled feature and burning even if it is disabled
+	if def.HasAdminPrivileges(addr) {
 		return featureEnabled || feature == Feature_burning
 	}
 
@@ -196,14 +196,20 @@ func (def Definition) IsFeatureEnabled(feature Feature) bool {
 	return lo.Contains(def.Features, feature)
 }
 
-// IsIssuer returns true if the addr is the issuer.
-func (def Definition) IsIssuer(addr sdk.Address) bool {
-	return def.Issuer == addr.String()
+// IsAdmin returns true if the addr is the admin.
+func (def Definition) IsAdmin(addr sdk.Address) bool {
+	return def.Admin == addr.String()
+}
+
+// HasAdminPrivileges returns true if the addr is the admin or the asset extension contract address.
+func (def Definition) HasAdminPrivileges(addr sdk.Address) bool {
+	return def.Admin == addr.String() || def.ExtensionCWAddress == addr.String()
 }
 
 // ValidateFeatures verifies that provided features belong to the defined set.
 func ValidateFeatures(features []Feature) error {
 	present := map[Feature]struct{}{}
+	hasExtension := false
 	for _, f := range features {
 		name, exists := Feature_name[int32(f)]
 		if !exists {
@@ -212,13 +218,23 @@ func ValidateFeatures(features []Feature) error {
 		if _, exists := present[f]; exists {
 			return sdkerrors.Wrapf(ErrInvalidInput, "duplicated feature: %s", name)
 		}
+		if f == Feature_extension {
+			hasExtension = true
+		}
 		present[f] = struct{}{}
+	}
+	if hasExtension {
+		for _, item := range features {
+			if item == Feature_ibc || item == Feature_block_smart_contracts {
+				return sdkerrors.Wrapf(ErrInvalidInput, "extension is not allowed in combination with %s", item.String())
+			}
+		}
 	}
 	return nil
 }
 
 // ValidateBurnRate checks that the provided burn rate is valid.
-func ValidateBurnRate(burnRate sdk.Dec) error {
+func ValidateBurnRate(burnRate sdkmath.LegacyDec) error {
 	if err := validateRate(burnRate); err != nil {
 		return errors.Wrap(err, "burn rate is invalid")
 	}
@@ -226,14 +242,14 @@ func ValidateBurnRate(burnRate sdk.Dec) error {
 }
 
 // ValidateSendCommissionRate checks that provided send commission rate is valid.
-func ValidateSendCommissionRate(sendCommissionRate sdk.Dec) error {
+func ValidateSendCommissionRate(sendCommissionRate sdkmath.LegacyDec) error {
 	if err := validateRate(sendCommissionRate); err != nil {
 		return errors.Wrap(err, "send commission rate is invalid")
 	}
 	return nil
 }
 
-func validateRate(rate sdk.Dec) error {
+func validateRate(rate sdkmath.LegacyDec) error {
 	const maxRatePrecisionAllowed = 4
 
 	if rate.IsNil() {
@@ -244,26 +260,23 @@ func validateRate(rate sdk.Dec) error {
 		return sdkerrors.Wrap(ErrInvalidInput, "rate precision should not be more than 4 decimal places")
 	}
 
-	if rate.LT(sdk.NewDec(0)) || rate.GT(sdk.NewDec(1)) {
+	if rate.LT(sdkmath.LegacyNewDec(0)) || rate.GT(sdkmath.LegacyNewDec(1)) {
 		return sdkerrors.Wrap(ErrInvalidInput, "rate is not within acceptable range")
 	}
 
 	return nil
 }
 
-// checks that dec precision is limited to the provided value.
-func isDecPrecisionValid(dec sdk.Dec, prec uint) bool {
-	return dec.Mul(sdk.NewDecFromInt(sdkmath.NewInt(int64(math.Pow10(int(prec)))))).IsInteger()
-}
-
-// TokenUpgradeV1Keeper defines methods required to update tokens to V1.
-type TokenUpgradeV1Keeper interface {
-	UpgradeTokenToV1(ctx sdk.Context, data *DelayedTokenUpgradeV1) error
-}
-
-// NewTokenUpgradeV1Handler handles token V1 upgrade.
-func NewTokenUpgradeV1Handler(keeper TokenUpgradeV1Keeper) delaytypes.Handler {
-	return func(ctx sdk.Context, data proto.Message) error {
-		return keeper.UpgradeTokenToV1(ctx, data.(*DelayedTokenUpgradeV1))
+// ValidateDEXSettings checks that provided DEX settings are valid.
+func ValidateDEXSettings(settings DEXSettings) error {
+	if !settings.UnifiedRefAmount.IsPositive() {
+		return sdkerrors.Wrap(ErrInvalidInput, "unified ref amount must be positive")
 	}
+
+	return nil
+}
+
+// checks that dec precision is limited to the provided value.
+func isDecPrecisionValid(dec sdkmath.LegacyDec, prec uint) bool {
+	return dec.Mul(sdkmath.LegacyNewDecFromInt(sdkmath.NewInt(int64(math.Pow10(int(prec)))))).IsInteger()
 }

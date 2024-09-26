@@ -15,8 +15,8 @@ import (
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-	ibctransfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
-	ibcchanneltypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
+	ibctransfertypes "github.com/cosmos/ibc-go/v8/modules/apps/transfer/types"
+	ibcchanneltypes "github.com/cosmos/ibc-go/v8/modules/core/04-channel/types"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
@@ -74,10 +74,10 @@ func TestIBCTransferFromSmartContract(t *testing.T) {
 	osmosisChain := chains.Osmosis
 
 	osmosisToCoreumChannelID := osmosisChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, coreumChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, coreumChain.ChainContext,
 	)
 	coreumToOsmosisChannelID := coreumChain.AwaitForIBCChannelID(
-		ctx, t, ibctransfertypes.PortID, osmosisChain.ChainSettings.ChainID,
+		ctx, t, ibctransfertypes.PortID, osmosisChain.ChainContext,
 	)
 
 	coreumAdmin := coreumChain.GenAccount()
@@ -94,7 +94,7 @@ func TestIBCTransferFromSmartContract(t *testing.T) {
 	// deploy the contract and fund it
 	contractAddr, _, err := coreumChain.Wasm.DeployAndInstantiateWASMContract(
 		ctx,
-		coreumChain.TxFactory().WithSimulateAndExecute(true),
+		coreumChain.TxFactoryAuto(),
 		coreumAdmin,
 		ibcwasm.IBCTransferWASM,
 		integration.InstantiateConfig{
@@ -139,7 +139,7 @@ func TestIBCTransferFromSmartContract(t *testing.T) {
 
 	_, err = coreumChain.Wasm.ExecuteWASMContract(
 		ctx,
-		coreumChain.TxFactory().WithSimulateAndExecute(true),
+		coreumChain.TxFactoryAuto(),
 		coreumAdmin,
 		contractAddr,
 		transferPayload,
@@ -153,7 +153,7 @@ func TestIBCTransferFromSmartContract(t *testing.T) {
 			Denom:   sendToOsmosisCoin.Denom,
 		})
 	requireT.NoError(err)
-	requireT.Equal(sdk.ZeroInt().String(), contractBalance.Balance.Amount.String())
+	requireT.Equal(sdkmath.ZeroInt().String(), contractBalance.Balance.Amount.String())
 
 	expectedOsmosisRecipientBalance := sdk.NewCoin(
 		ConvertToIBCDenom(osmosisToCoreumChannelID, sendToOsmosisCoin.Denom),
@@ -195,7 +195,7 @@ func TestIBCCallFromSmartContract(t *testing.T) {
 
 	coreumContractAddr, _, err := coreumChain.Wasm.DeployAndInstantiateWASMContract(
 		ctx,
-		coreumChain.TxFactory().WithSimulateAndExecute(true),
+		coreumChain.TxFactoryAuto(),
 		coreumCaller,
 		ibcwasm.IBCCallWASM,
 		integration.InstantiateConfig{
@@ -209,7 +209,7 @@ func TestIBCCallFromSmartContract(t *testing.T) {
 
 	osmosisContractAddr, _, err := osmosisChain.Wasm.DeployAndInstantiateWASMContract(
 		ctx,
-		osmosisChain.TxFactory().WithSimulateAndExecute(true),
+		osmosisChain.TxFactoryAuto(),
 		osmosisCaller,
 		ibcwasm.IBCCallWASM,
 		integration.InstantiateConfig{
@@ -250,10 +250,10 @@ func TestIBCCallFromSmartContract(t *testing.T) {
 	defer closerFunc()
 
 	coreumToOsmosisChannelID := coreumChain.AwaitForIBCChannelID(
-		ctx, t, coreumIBCPort, osmosisChain.ChainSettings.ChainID,
+		ctx, t, coreumIBCPort, osmosisChain.ChainContext,
 	)
 	osmosisToCoreumChannelID := osmosisChain.AwaitForIBCChannelID(
-		ctx, t, osmosisIBCPort, coreumChain.ChainSettings.ChainID,
+		ctx, t, osmosisIBCPort, coreumChain.ChainContext,
 	)
 	t.Logf(
 		"Channels are ready coreum channel ID:%s, osmosis channel ID:%s",
@@ -303,7 +303,7 @@ func executeWasmIncrement(
 
 	_, err = chain.Wasm.ExecuteWASMContract(
 		ctx,
-		chain.TxFactory().WithSimulateAndExecute(true),
+		chain.TxFactoryAuto(),
 		caller,
 		contractAddr,
 		incrementPayload,

@@ -1,7 +1,7 @@
 package modules
 
 import (
-	sdk "github.com/cosmos/cosmos-sdk/types"
+	sdkmath "cosmossdk.io/math"
 
 	assetnfttypes "github.com/CoreumFoundation/coreum/v4/x/asset/nft/types"
 )
@@ -29,6 +29,12 @@ type NftMintRequest struct {
 	URIHash   string `json:"uri_hash"`
 	Data      string `json:"data"`
 	Recipient string `json:"recipient"`
+}
+
+// NftModifyDataRequest is used to modify data of mutable NFTs.
+type NftModifyDataRequest struct {
+	ID   string `json:"id"`
+	Data string `json:"data"`
 }
 
 // NftIDRequest is used to query NFT with ID.
@@ -70,6 +76,14 @@ type NftOwnerRequest struct {
 	Owner string `json:"owner"`
 }
 
+// NftClassIDWithIDRequest is used to query an NFT with class_id and id.
+//
+//nolint:tagliatelle
+type NftClassIDWithIDRequest struct {
+	ClassID string `json:"class_id"`
+	ID      string `json:"id"`
+}
+
 // NftMethod is a wrapper type for all the methods used in smart contract.
 type NftMethod string
 
@@ -77,6 +91,9 @@ type NftMethod string
 const (
 	// transactions.
 	NftMethodMint                     NftMethod = "mint"
+	NftMethodMintImmutable            NftMethod = "mint_immutable"
+	NftMethodMintMutable              NftMethod = "mint_mutable"
+	NftMethodModifyData               NftMethod = "modify_data"
 	NftMethodBurn                     NftMethod = "burn"
 	NftMethodFreeze                   NftMethod = "freeze"
 	NftMethodUnfreeze                 NftMethod = "unfreeze"
@@ -106,6 +123,7 @@ const (
 	NftMethodNFTs                      NftMethod = "nfts"
 	NftMethodClassNFT                  NftMethod = "class_nft"
 	NftMethodClassesNFT                NftMethod = "classes_nft"
+	NftMethodExternalNFT               NftMethod = "external_nft"
 )
 
 // AssetnftClass represents the Class in asset nft module.
@@ -121,7 +139,7 @@ type AssetnftClass struct {
 	URIHash     string                       `json:"uri_hash"`
 	Data        string                       `json:"data"`
 	Features    []assetnfttypes.ClassFeature `json:"features"`
-	RoyaltyRate sdk.Dec                      `json:"royalty_rate"`
+	RoyaltyRate sdkmath.LegacyDec            `json:"royalty_rate"`
 }
 
 // AssetnftClassResponse is returned when querying for class info.
